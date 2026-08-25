@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>To Do</title>
+<meta name="description" content="Personal task list with a daily morning focus digest.">
+<link rel="manifest" href="/manifest.json">
+<link rel="stylesheet" href="/styles.css">
+<meta name="theme-color" content="#f7f7f5" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#16161a" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="To Do">
+<link rel="apple-touch-icon" href="/icons/icon-180.png">
+<link rel="icon" href="/icons/icon-192.png">
+</head>
+<body>
+    <div id="demo-banner" class="demo-banner" hidden>
+      <strong>Demo</strong> — sample data, invented person. Change anything you
+      like; it resets itself every night.
+      <button id="demo-reset" type="button">Reset now</button>
+    </div>
+
+<!-- Passphrase gate -------------------------------------------------------->
+<div id="lock" class="lock" hidden>
+  <form id="lock-form" class="lock-card">
+    <h1>To Do</h1>
+    <p class="muted">Enter your passphrase to unlock this device.</p>
+    <input id="lock-input" type="password" autocomplete="current-password"
+           placeholder="Passphrase" required>
+    <button type="submit" class="btn primary">Unlock</button>
+    <p id="lock-error" class="error" hidden></p>
+    <p id="lock-demo-hint" class="muted small" hidden>
+      Demo passphrase <strong>demo</strong> is filled in &mdash; just tap Unlock.
+    </p>
+  </form>
+</div>
+
+<!-- App -------------------------------------------------------------------->
+<div id="app" hidden>
+
+  <header class="topbar">
+    <div>
+      <h1 id="greeting">Today</h1>
+      <p id="today-date" class="muted small"></p>
+    </div>
+    <button id="settings-btn" class="icon-btn" aria-label="Settings" title="Settings">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3"></circle>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.34.4.62.73.79H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+      </svg>
+    </button>
+  </header>
+
+  <!-- Folders -------------------------------------------------------------->
+  <nav class="folders" role="tablist" aria-label="Folder">
+    <button class="folder is-active" data-folder="all" role="tab" aria-selected="true">
+      All <span class="folder-count" id="count-all"></span>
+    </button>
+    <button class="folder" data-folder="work" role="tab" aria-selected="false">
+      <span class="folder-name" id="tab-name-work">Work</span>
+      <span class="folder-count" id="count-work"></span>
+    </button>
+    <button class="folder" data-folder="personal" role="tab" aria-selected="false">
+      <span class="folder-name" id="tab-name-personal">Personal</span>
+      <span class="folder-count" id="count-personal"></span>
+    </button>
+    <button class="folder" data-folder="fitness" role="tab" aria-selected="false">
+      <span class="folder-name" id="tab-name-fitness">Fitness</span>
+      <span class="folder-count" id="count-fitness"></span>
+    </button>
+  </nav>
+
+  <p id="today-events" class="today-events" hidden></p>
+  <p id="workload" class="workload" hidden></p>
+
+  <!-- Today's workout ------------------------------------------------------->
+  <section id="workout-card" class="workout" hidden>
+    <div class="workout-head">
+      <span class="workout-label">Today's workout</span>
+      <span id="workout-streak" class="streak"></span>
+    </div>
+    <div class="workout-body">
+      <div id="workout-title" class="workout-title"></div>
+      <div id="workout-meta" class="workout-meta"></div>
+      <div id="workout-notes" class="workout-notes"></div>
+    </div>
+    <div id="workout-actions" class="workout-actions">
+      <button id="workout-done" class="btn primary">Done</button>
+      <button id="workout-skip" class="btn ghost">Skip today</button>
+    </div>
+    <p id="workout-logged" class="workout-logged" hidden></p>
+  </section>
+
+  <!-- Add ------------------------------------------------------------------>
+  <section>
+    <form id="quick-form" class="quick-add">
+      <input id="quick-input" type="text" autocomplete="off"
+             placeholder="Call Riverside friday 3pm p1 #work 30m">
+      <button type="submit" class="btn primary">Add</button>
+    </form>
+    <p id="quick-preview" class="quick-preview" hidden></p>
+    <button id="add-toggle" class="add-toggle">
+      <span class="plus" aria-hidden="true">+</span> More options
+    </button>
+
+    <form id="task-form" class="card form" hidden>
+      <input type="hidden" id="task-id">
+
+      <label class="field">
+        <span>Task</span>
+        <input id="f-title" type="text" placeholder="What needs doing?" required maxlength="200">
+      </label>
+
+      <label class="field">
+        <span>What it needs</span>
+        <textarea id="f-notes" rows="3"
+          placeholder="Context, blockers, links, what &quot;done&quot; looks like…" maxlength="4000"></textarea>
+      </label>
+
+      <div class="row">
+        <label class="field">
+          <span>Folder</span>
+          <select id="f-category">
+            <option value="personal" id="opt-personal" selected>Personal</option>
+            <option value="work" id="opt-work">Work</option>
+            <option value="fitness" id="opt-fitness">Fitness</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Deadline</span>
+          <input id="f-deadline" type="date">
+        </label>
+      </div>
+
+      <div class="row">
+        <label class="field">
+          <span>Priority</span>
+          <select id="f-priority">
+            <option value="1">High</option>
+            <option value="2" selected>Normal</option>
+            <option value="3">Low</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Est. minutes</span>
+          <!-- step counts from `min`, so step="5" with min="1" would reject
+               30, 60 and 90. Any whole number is fine here. -->
+          <input id="f-estimate" type="number" min="1" step="1"
+                 inputmode="numeric" placeholder="30">
+        </label>
+      </div>
+
+      <div class="row">
+        <label class="field">
+          <span>Repeats</span>
+          <select id="f-recur">
+            <option value="">Doesn't repeat</option>
+            <option value="daily">Every day</option>
+            <option value="weekdays">Every weekday</option>
+            <option value="weekly">Every week</option>
+            <option value="monthly">Every month</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Hide until</span>
+          <input id="f-snooze" type="date">
+        </label>
+      </div>
+
+      <label class="check-row">
+        <input id="f-hide-until-due" type="checkbox">
+        <span>Hide until the day it's due</span>
+      </label>
+      <p class="muted small">
+        For things there is nothing to do about early. A repeating task keeps
+        this setting on every future occurrence.
+      </p>
+
+      <div class="quick-picks" role="group" aria-label="Common durations">
+        <button type="button" class="quick" data-minutes="15">15m</button>
+        <button type="button" class="quick" data-minutes="30">30m</button>
+        <button type="button" class="quick" data-minutes="60">1h</button>
+        <button type="button" class="quick" data-minutes="120">2h</button>
+        <button type="button" class="quick" data-minutes="240">4h</button>
+        <button type="button" class="quick" data-minutes="">Clear</button>
+      </div>
+
+      <div class="field">
+        <span>Checklist</span>
+        <div id="subtask-list" class="subtask-list"></div>
+        <div class="subtask-add">
+          <input id="subtask-input" type="text" placeholder="Add a step" maxlength="200">
+          <button type="button" id="subtask-add-btn" class="btn">Add</button>
+        </div>
+      </div>
+
+      <div class="form-actions">
+        <button type="submit" class="btn primary" id="save-btn">Add task</button>
+        <button type="button" class="btn ghost" id="cancel-btn">Cancel</button>
+        <button type="button" class="btn danger-ghost" id="delete-btn" hidden>Delete</button>
+      </div>
+      <p id="form-error" class="error" hidden></p>
+    </form>
+  </section>
+
+  <!-- List ----------------------------------------------------------------->
+  <section>
+    <div class="list-head">
+      <h2 class="section-label">Tasks</h2>
+      <div class="tabs" role="tablist">
+        <button class="tab is-active" data-filter="open" role="tab">Open</button>
+        <button class="tab" data-filter="done" role="tab">Done</button>
+        <button class="tab" data-filter="all" role="tab">All</button>
+      </div>
+    </div>
+    <input id="search" type="search" class="search" placeholder="Search tasks…" autocomplete="off">
+    <p class="swipe-hint muted small">Swipe left for options, right to hide until later.</p>
+    <div id="task-list" class="task-list"></div>
+    <p id="empty-state" class="muted empty" hidden>Nothing here yet.</p>
+  </section>
+
+  <!-- Coming up ------------------------------------------------------------>
+  <section id="upcoming-section" hidden>
+    <div class="list-head">
+      <h2 class="section-label">Coming up</h2>
+      <div class="tabs" role="tablist">
+        <button class="range is-active" data-range="7" role="tab">7 days</button>
+        <button class="range" data-range="14" role="tab">14</button>
+        <button class="range" data-range="21" role="tab">21</button>
+      </div>
+    </div>
+    <p id="free-days" class="muted small" style="margin-bottom:10px"></p>
+    <div id="upcoming-list" class="upcoming-list"></div>
+    <p id="upcoming-empty" class="muted empty" hidden>Nothing scheduled ahead.</p>
+  </section>
+
+  <footer class="footer muted small">
+    <span id="digest-note"></span>
+  </footer>
+</div>
+
+<!-- Settings --------------------------------------------------------------->
+<div id="settings" class="sheet" hidden>
+  <div class="sheet-card">
+    <div class="sheet-head">
+      <h2>Settings</h2>
+      <button id="settings-close" class="icon-btn" aria-label="Close">✕</button>
+    </div>
+
+    <section class="setting-block">
+      <h3>Morning notification</h3>
+      <p class="muted small">
+        Sent once a day to every device below. Turn it on separately on each
+        device you want notified.
+      </p>
+
+      <div id="notif-status" class="status-pill">Checking…</div>
+
+      <button id="enable-notif" class="btn primary full" hidden>
+        Enable notifications on this device
+      </button>
+
+      <p id="ios-hint" class="hint" hidden>
+        On iPhone, notifications only work once this app is on your Home Screen.
+        Tap <strong>Share → Add to Home Screen</strong>, then open it from the
+        new icon and come back here.
+      </p>
+
+      <div class="row tight">
+        <label class="field">
+          <span>Time</span>
+          <select id="s-hour"></select>
+        </label>
+        <label class="field grow">
+          <span>Timezone</span>
+          <input id="s-timezone" type="text" placeholder="America/Chicago">
+        </label>
+      </div>
+      <label class="field" style="margin-top:14px">
+        <span>Daily capacity (minutes, 0 = no warning)</span>
+        <input id="s-capacity" type="number" min="0" max="1440" step="1"
+               inputmode="numeric" placeholder="0">
+      </label>
+      <p class="muted small" style="margin-top:16px">
+        Evening nudge — sent only if something due that day is still open.
+        Finish everything and nothing arrives.
+      </p>
+      <div class="day-toggles" id="evening-days" role="group" aria-label="Evening nudge days">
+        <button type="button" data-day="0">Sun</button>
+        <button type="button" data-day="1">Mon</button>
+        <button type="button" data-day="2">Tue</button>
+        <button type="button" data-day="3">Wed</button>
+        <button type="button" data-day="4">Thu</button>
+        <button type="button" data-day="5">Fri</button>
+        <button type="button" data-day="6">Sat</button>
+      </div>
+      <label class="field" style="margin-top:10px">
+        <span>Evening nudge time</span>
+        <select id="s-evening-hour"></select>
+      </label>
+
+      <button id="save-settings" class="btn full">Save schedule</button>
+    </section>
+
+    <section class="setting-block">
+      <h3>Folder names</h3>
+      <p class="muted small">
+        Three folders, named however you like. Renaming is safe &mdash; existing
+        tasks stay where they are, because only the label changes.
+      </p>
+      <label class="field" style="margin-top:12px">
+        <span>First folder</span>
+        <input id="s-folder-work" type="text" maxlength="14" placeholder="Work">
+      </label>
+      <label class="field">
+        <span>Second folder</span>
+        <input id="s-folder-personal" type="text" maxlength="14" placeholder="Personal">
+      </label>
+      <label class="field">
+        <span>Third folder</span>
+        <input id="s-folder-fitness" type="text" maxlength="14" placeholder="Fitness">
+      </label>
+      <p class="muted small">
+        The daily workout task is created in the third folder, whatever it is
+        called.
+      </p>
+      <p id="folder-width-warning" class="muted small" hidden></p>
+    </section>
+
+    <section class="setting-block">
+      <h3>Devices</h3>
+      <div id="device-list" class="device-list"></div>
+      <button id="test-push" class="btn full">Send a test notification now</button>
+      <p id="test-result" class="muted small"></p>
+    </section>
+
+    <section class="setting-block">
+      <h3>Clinical schedule</h3>
+      <p id="sched-status" class="muted small"></p>
+      <button id="sched-sync" class="btn full">Sync now</button>
+
+      <p class="muted small" style="margin-top:16px">
+        An all-day assignment carries no hours, so tell the app what each one
+        actually costs. Match on any part of the name — "MICU" catches
+        "MICU Service - Attending". The most specific match wins.
+      </p>
+      <div id="map-list" class="event-list"></div>
+      <div class="plan-row">
+        <input class="grow" id="map-pattern" placeholder="MICU" maxlength="80">
+        <input class="shrink" id="map-minutes" type="number" min="0" max="1440"
+               step="1" inputmode="numeric" placeholder="minutes">
+        <button type="button" id="map-add" class="btn">Add</button>
+      </div>
+    </section>
+
+    <section class="setting-block">
+      <h3>Weekly schedule</h3>
+      <p class="muted small">
+        Standing commitments — clinic, teaching, recurring meetings. They appear
+        in your morning brief and reduce the time counted as free.
+      </p>
+      <div id="event-list" class="event-list"></div>
+      <div class="event-add">
+        <div class="plan-row">
+          <select class="shrink" id="ev-day"></select>
+          <input class="grow" id="ev-title" placeholder="Clinic" maxlength="120">
+        </div>
+        <div class="plan-row">
+          <input class="shrink" id="ev-start" type="time">
+          <input class="shrink" id="ev-end" type="time">
+          <button type="button" id="ev-add" class="btn">Add</button>
+        </div>
+        <label class="checkline">
+          <input type="checkbox" id="ev-tentative">
+          <span>Rarely attend — show it, but don't count the time</span>
+        </label>
+      </div>
+    </section>
+
+    <section class="setting-block">
+      <h3>Weekly workout plan</h3>
+      <p class="muted small">
+        One entry per day. Set a day to <strong>Rest</strong> and nothing is
+        scheduled or added to your list.
+      </p>
+      <p id="plan-warning" class="hint" hidden></p>
+      <div id="plan-editor" class="plan-editor"></div>
+    </section>
+
+    <section class="setting-block">
+      <h3>Housekeeping</h3>
+      <p class="muted small">
+        Completed tasks are deleted once they reach this age. The generated
+        workout rows are one a day forever, and your workout log already
+        records what you actually did.
+      </p>
+      <label class="field" style="margin-top:12px">
+        <span>Delete completed after (days, 0 = keep forever)</span>
+        <input id="s-archive" type="number" min="0" max="3650" step="1"
+               inputmode="numeric" placeholder="90">
+      </label>
+      <p id="archive-status" class="muted small" style="margin-top:10px"></p>
+      <button id="archive-now" class="btn full">Clean up now</button>
+
+      <p class="muted small" style="margin-top:16px">
+        Everything lives in one database. A copy you hold yourself is the only
+        thing that survives losing access to it.
+      </p>
+      <button id="export-now" class="btn full">Download a backup</button>
+
+      <p class="muted small" style="margin-top:16px">
+        Automatic backup to Google Drive, every Sunday morning. The app can only
+        see the folder it creates - it has no access to the rest of your Drive.
+      </p>
+      <p id="backup-status" class="muted small"></p>
+      <button id="backup-now" class="btn full">Back up to Drive now</button>
+
+      <p class="muted small" style="margin-top:16px">
+        Restoring replaces everything currently in the app. A copy of the
+        current state is saved to Drive first, so a restore can be undone.
+        Signed-in devices and notifications are left alone.
+      </p>
+      <label class="field">
+        <span>Restore from a backup file</span>
+        <input id="restore-file" type="file" accept="application/json,.json">
+      </label>
+      <p id="restore-status" class="muted small"></p>
+      <button id="restore-confirm" class="btn full danger" hidden>Replace everything</button>
+    </section>
+
+    <section class="setting-block">
+      <h3>Signed-in devices</h3>
+      <p class="muted small">
+        Each device holds its own session, not your passphrase. Sign one out
+        here and it stops working immediately, without affecting the others.
+      </p>
+      <div id="session-list" class="device-list"></div>
+      <button id="sign-out-others" class="btn full">Sign out all other devices</button>
+    </section>
+
+    <section class="setting-block">
+      <button id="sign-out" class="btn danger-ghost full">Sign out of this device</button>
+    </section>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script type="module" src="/parse.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

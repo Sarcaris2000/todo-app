@@ -1,0 +1,35 @@
+# Optional: a second, public deployment with sample data.
+#
+# A completely separate Worker and database - nothing is shared with your real
+# app. DEMO_MODE turns on the banner, prefills the passphrase on the lock
+# screen, reseeds the sample data every six hours, and suppresses the failed
+# sign-in alert (pointless when the passphrase is printed on screen).
+#
+#   npx wrangler d1 create todo-demo      # paste the id below
+#   npx wrangler deploy -c wrangler.demo.toml
+#
+# Give it its OWN passphrase and its OWN VAPID keys. Never reuse your real
+# ones - the demo's passphrase is public by design.
+name = "todo-demo"
+main = "src/index.js"
+compatibility_date = "2025-06-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "todo-demo"
+database_id = ""
+
+[triggers]
+crons = ["0,30 * * * *"]
+
+[vars]
+ENVIRONMENT = "production"
+DEFAULT_TIMEZONE = "America/Chicago"
+DEFAULT_NOTIFY_HOUR = "6"
+DEMO_MODE = "true"

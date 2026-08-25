@@ -1,0 +1,6 @@
+# A personal task app and its demo. Neither belongs in a search index under
+# a real person's name. The public pages (/about, /privacy, /terms) exist for
+# Google's OAuth consent screen, which reads them directly rather than through
+# a crawler, so blocking indexing costs nothing.
+User-agent: *
+Disallow: /

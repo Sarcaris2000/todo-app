@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy - To Do</title>
+<link rel="stylesheet" href="/page.css">
+</head>
+<body>
+<main>
+  <h1>Privacy policy</h1>
+  <p class="lede">Last updated 24 August 2026.</p>
+
+  <p>
+    To Do is a personal task application with a single user, who is also its
+    author. It has no sign-up, no other accounts, and no way for anyone else to
+    store data in it. This policy describes what that one person's data does.
+  </p>
+
+  <h2>What is stored</h2>
+  <ul>
+    <li>Tasks, notes, deadlines, estimates, and completion history</li>
+    <li>Recurring weekly commitments</li>
+    <li>A workout plan and log</li>
+    <li>An imported work schedule, used to estimate how much of each day is already committed</li>
+    <li>Web push subscriptions for the devices that receive the daily notification</li>
+    <li>Sign-in sessions, stored as hashes rather than as tokens</li>
+  </ul>
+  <p>
+    All of it lives in a Cloudflare D1 database in the United States, reachable
+    only by this application.
+  </p>
+
+  <h2>What is not stored</h2>
+  <p>
+    There is no analytics, no tracking, no advertising, and no third-party
+    scripts of any kind. Nothing is sold, shared, or transmitted to anyone. No
+    patient information or other identifiable third-party data is entered into
+    the application.
+  </p>
+
+  <h2>Google Drive</h2>
+  <p>
+    The application can upload a weekly backup of its own database to its
+    owner's Google Drive. It requests the
+    <code>drive.file</code> scope only, which allows an application to see and
+    manage exclusively the files it created itself. It cannot read, list, or
+    modify any other file in the Drive account, and it never attempts to.
+  </p>
+  <p>
+    Backups exclude push subscriptions and sign-in sessions: those are device
+    credentials, they are recreated simply by signing in again, and cloud
+    storage is the wrong place for them.
+  </p>
+  <p>
+    Authorisation can be withdrawn at any time at
+    <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>,
+    which immediately and permanently ends the application's access.
+  </p>
+
+  <h2>Retention</h2>
+  <p>
+    Completed tasks are deleted automatically after a configurable period. The
+    twelve most recent backups are kept and older ones are deleted. Deleting
+    the database deletes everything.
+  </p>
+
+  <h2>Contact</h2>
+  <p><a href="mailto:you@example.com">you@example.com</a></p>
+
+  <p class="links">
+    <a href="/about.html">About</a>
+    <a href="/terms.html">Terms</a>
+  </p>
+</main>
+</body>
+</html>

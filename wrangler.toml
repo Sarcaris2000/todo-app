@@ -1,0 +1,41 @@
+name = "todo-app"
+main = "src/index.js"
+compatibility_date = "2025-06-01"
+
+# Static frontend. Every request goes through the Worker, not just /api/*:
+# assets served directly by the asset router would bypass the security headers
+# and the HTTPS redirect, and the CSP matters most on the HTML document itself.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = true
+
+# The task database. ./setup.sh creates it and fills in database_id below.
+[[d1_databases]]
+binding = "DB"
+database_name = "todo"
+database_id = ""
+
+# Cloudflare cron runs in UTC, so a fixed "6am" entry would drift an hour at
+# every daylight-saving change. Instead the Worker wakes twice an hour and
+# checks whether it is currently 6am in your configured timezone.
+[triggers]
+crons = ["0,30 * * * *"]
+
+[vars]
+ENVIRONMENT = "production"
+DEFAULT_TIMEZONE = "America/Chicago"
+DEFAULT_NOTIFY_HOUR = "6"
+
+# --- optional: your own domain ----------------------------------------------
+# By default this deploys to <name>.<subdomain>.workers.dev. If you own a domain
+# on Cloudflare, add a custom domain instead and set workers_dev = false.
+# Some corporate networks block *.workers.dev outright, which looks exactly
+# like a broken deploy - a custom domain is the fix.
+#
+# workers_dev = false
+#
+# [[routes]]
+# pattern = "todo.example.com"
+# custom_domain = true

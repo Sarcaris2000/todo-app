@@ -1,0 +1,66 @@
+/* Static informational pages. Deliberately separate from the app's stylesheet:
+   these are public, must render with no JavaScript, and should keep working
+   even if the app's design changes. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --muted: #5a5a5a;
+  --rule: #e3e3e3;
+  --link: #2a5db0;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16171a;
+    --fg: #e9e9ea;
+    --muted: #a0a0a4;
+    --rule: #2c2e33;
+    --link: #8ab4f8;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 17px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+main {
+  max-width: 38rem;
+  margin: 0 auto;
+  padding: 3rem 1.5rem 4rem;
+}
+
+h1 { font-size: 1.75rem; line-height: 1.2; margin: 0 0 .5rem; letter-spacing: -.01em; }
+h2 { font-size: 1.05rem; margin: 2.25rem 0 .5rem; letter-spacing: -.005em; }
+
+.lede { color: var(--muted); margin-top: 0; }
+
+p, ul { margin: 0 0 1rem; }
+ul { padding-left: 1.25rem; }
+li { margin-bottom: .35rem; }
+
+code {
+  font: .9em/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  padding: .15em .4em;
+  border-radius: 4px;
+}
+
+a { color: var(--link); }
+
+.links {
+  margin-top: 2.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--rule);
+  display: flex;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  font-size: .95rem;
+}
