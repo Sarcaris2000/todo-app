@@ -23,8 +23,8 @@ copy to your own Cloudflare account, and your data lives in your database.
 - **Recurring tasks, snooze, subtasks, search**, natural-language quick add, a
   weekly workout plan with streaks, and tasks that stay hidden until the day
   they are actually actionable.
-- **Weekly backups to your own Google Drive**, and a restore path that has been
-  tested rather than assumed.
+- **Weekly backups to your own Google Drive**, encrypted before they leave, with
+  a restore path that has been tested rather than assumed.
 
 Installs as a progressive web app on iPhone, iPad, and Mac.
 
@@ -92,17 +92,19 @@ passphrase when the hostname begins with `demo.`.
 npm test
 ```
 
-Around 420 checks covering the push encryption against an independent
+Around 460 checks covering the push encryption against an independent
 decryption, ranking, recurrence, the iCalendar parser, free-window maths, auth
-and lockout, the restore path against a real SQLite database, and a set of
-frontend structure assertions that exist because each one caught a real bug once.
+and lockout, the restore path against a real SQLite database, backup encryption
+including tamper detection, and a set of frontend structure assertions that
+exist because each one caught a real bug once.
 
 No network access, no fixtures to maintain. Run it before every deploy.
 
 ## A word on privacy
 
 The server has to read your task titles to compose the morning digest, so
-end-to-end encryption is not possible by design. **Do not put anything
+end-to-end encryption of the live data is not possible by design. Backups are a
+different matter and *are* encrypted - see above. **Do not put anything
 confidential in a task title** — for clinical users, that means no patient
 identifiers.
 

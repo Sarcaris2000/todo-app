@@ -21,6 +21,9 @@ import { longestFreeWindow, toClock } from './freetime.js';
 import { parseQuickAdd } from '../public/parse.js';
 import { backupToDrive, isConfigured as driveConfigured } from './gdrive.js';
 import { inspectExport, restoreExport } from './restore.js';
+import {
+  encryptBackup, decryptBackup, isEncryptedBackup, toBase64, fromBase64,
+} from './backup-crypto.js';
 import { seedDemo } from './demo.js';
 import {
   checkLockout, recordFailure, clearFailures, clientIp,
@@ -273,17 +276,30 @@ async function buildExport(env, timezone) {
 
 async function runBackup(env, todayISO, timezone, prefix = 'todo-backup') {
   const payload = await buildExport(env, timezone);
+
+  // Sealed before it leaves, when a passphrase is configured. What reaches
+  // Google is then a blob that Google cannot read - which is the whole point:
+  // storage-provider encryption protects against a stolen disk, not against
+  // someone who is inside your account.
+  let body = JSON.stringify(payload, null, 2);
+  let filename = `${prefix}-${todayISO}.json`;
+  if (env.BACKUP_PASSPHRASE) {
+    body = toBase64(await encryptBackup(env.BACKUP_PASSPHRASE, body));
+    filename += '.enc';
+  }
+
   // Snapshots taken before a restore are a safety net for that afternoon, not
   // an archive, so only a few are worth keeping.
   const result = await backupToDrive(
     env,
-    `${prefix}-${todayISO}.json`,
-    JSON.stringify(payload, null, 2),
+    filename,
+    body,
     { keep: prefix === 'pre-restore' ? 3 : 12, prefix },
   );
 
   await setSetting(env, 'backup_last_result', result.ok
-    ? `Backed up ${result.file} (${Math.round(result.bytes / 1024)} KB)`
+    ? `Backed up ${result.file} (${Math.round(result.bytes / 1024)} KB${
+      env.BACKUP_PASSPHRASE ? ', encrypted' : ''})`
     : result.reason);
 
   // A run counter, so an alert can say how long this has been broken. One
@@ -1208,6 +1224,7 @@ async function handleApi(request, env, url) {
   if (path === '/api/backup' && method === 'GET') {
     return json({
       configured: driveConfigured(env),
+      encrypted: Boolean(env.BACKUP_PASSPHRASE),
       lastAt: await getSetting(env, 'backup_last_at', null),
       lastResult: await getSetting(env, 'backup_last_result', null),
     });
@@ -1237,7 +1254,25 @@ async function handleApi(request, env, url) {
   // --- restore ---------------------------------------------------------------
   if (path === '/api/import' && method === 'POST') {
     const body = await request.json().catch(() => null);
-    const payload = body?.backup;
+
+    let payload = body?.backup;
+
+    // A sealed file arrives base64-armoured; unseal it before anything else
+    // looks at it, so the rest of the path is identical for both kinds.
+    if (body?.encrypted) {
+      if (!env.BACKUP_PASSPHRASE) {
+        return json({ ok: false, error: 'This backup is encrypted, but no BACKUP_PASSPHRASE is set on the server.' }, 400);
+      }
+      try {
+        const bytes = fromBase64(body.encrypted);
+        if (!isEncryptedBackup(bytes)) {
+          return json({ ok: false, error: 'That file is not an encrypted backup from this app.' }, 400);
+        }
+        payload = JSON.parse(await decryptBackup(env.BACKUP_PASSPHRASE, bytes));
+      } catch (error) {
+        return json({ ok: false, error: String(error.message || error).slice(0, 200) }, 400);
+      }
+    }
 
     // Look before you leap: the client shows this summary and asks the user
     // to confirm it, so a wrong file is caught by a human before any write.
@@ -1260,7 +1295,11 @@ async function handleApi(request, env, url) {
     const result = await restoreExport(env, payload);
     if (!result.ok) return json({ ...result, error: result.errors?.[0] }, 400);
 
-    return json({ ...result, snapshot: snapshot?.ok ? snapshot.file : null });
+    return json({
+      ...result,
+      snapshot: snapshot?.ok ? snapshot.file : null,
+      encrypted: Boolean(env.BACKUP_PASSPHRASE),
+    });
   }
 
   // --- archive ---------------------------------------------------------------

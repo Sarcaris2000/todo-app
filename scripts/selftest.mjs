@@ -1609,6 +1609,125 @@ async function testDemoLock() {
     && !/checkLockout[^\n]*DEMO_MODE/.test(indexSrc));
 }
 
+// --- 16. backup encryption ----------------------------------------------------
+
+async function testBackupEncryption() {
+  console.log('\nBackup encryption');
+
+  const {
+    encryptBackup, decryptBackup, isEncryptedBackup, toBase64, fromBase64,
+    MAGIC, DEFAULT_ITERATIONS,
+  } = await import('../src/backup-crypto.js');
+  const read = (rel) => readFileSync(join(ROOT, rel), 'utf8');
+  const indexSrc = read('src/index.js');
+  const appSrc = read('public/app.js');
+
+  const pass = 'anchor-bramble-cinder-dapple-ember-fathom';
+  const payload = JSON.stringify({
+    app: 'todo', exported_at: '2026-08-30T11:00:00.000Z',
+    data: { tasks: [{ id: 't1', title: 'Sign outstanding PFT reports' }] },
+  });
+
+  const sealed = await encryptBackup(pass, payload);
+
+  check('a sealed backup round-trips', await decryptBackup(pass, sealed) === payload);
+  check('it is recognisable as ours', isEncryptedBackup(sealed));
+  check('plain JSON is not mistaken for sealed',
+    !isEncryptedBackup(new TextEncoder().encode(payload)));
+
+  // The whole point: the storage provider holds something it cannot read.
+  const asText = Buffer.from(sealed).toString('latin1');
+  check('no task title survives in the ciphertext',
+    !asText.includes('PFT reports') && !asText.includes('todo'));
+  check('base64 armour also leaks nothing',
+    !toBase64(sealed).includes(Buffer.from('PFT').toString('base64').slice(0, 4)));
+
+  await (async () => {
+    let refused = false;
+    try { await decryptBackup('wrong', sealed); } catch { refused = true; }
+    check('the wrong passphrase is refused', refused);
+  })();
+
+  // AES-GCM is authenticated, so a single flipped bit must fail rather than
+  // quietly restoring corrupted data over everything you own.
+  await (async () => {
+    const tampered = new Uint8Array(sealed);
+    tampered[tampered.length - 5] ^= 1;
+    let refused = false;
+    try { await decryptBackup(pass, tampered); } catch { refused = true; }
+    check('a single altered byte is detected', refused);
+  })();
+
+  await (async () => {
+    // A corrupt header must not be able to ask for hours of key derivation.
+    const bomb = new Uint8Array(sealed);
+    new DataView(bomb.buffer).setUint32(8, 4_000_000_000, false);
+    let refused = false;
+    try { await decryptBackup(pass, bomb); } catch (e) { refused = /implausible/.test(e.message); }
+    check('an absurd iteration count is rejected, not attempted', refused);
+  })();
+
+  check('base64 survives a round trip',
+    toBase64(fromBase64(toBase64(sealed))) === toBase64(sealed));
+  check('the iteration count meets the OWASP floor', DEFAULT_ITERATIONS >= 600_000);
+  check('the format is versioned', MAGIC === 'TODOBK02');
+
+  // Cloudflare rejects a single PBKDF2 call above 100,000 iterations, and
+  // local workerd does NOT enforce that - so this only ever failed in
+  // production. The target is reached by chaining rounds under the cap.
+  const cryptoSrc = read('src/backup-crypto.js');
+  check('no single PBKDF2 call exceeds the platform cap',
+    /iterations: perRound/.test(cryptoSrc) && /MAX_ITERATIONS_PER_ROUND = 100_000/.test(cryptoSrc));
+  check('rounds are chained, each feeding the next',
+    /material = new Uint8Array\(await crypto\.subtle\.deriveBits/.test(cryptoSrc));
+  check('the per-round count stays within the cap',
+    Math.ceil(DEFAULT_ITERATIONS / Math.ceil(DEFAULT_ITERATIONS / 100_000)) <= 100_000);
+  check('the comment records why, so nobody "simplifies" it back',
+    /iteration counts above 100000/.test(cryptoSrc));
+
+  // A passphrase guarding a file in cloud storage faces offline guessing, so
+  // it needs real entropy - the first version of this shipped ~34 bits.
+  const setterSrc = read('scripts/set-backup-passphrase.mjs');
+  check('the generator produces at least 100 bits',
+    /const CHARS = 24;/.test(setterSrc) && /ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'/.test(setterSrc));
+  check('the weak word-list generator is gone', !/WORDS = \[/.test(setterSrc));
+
+  // Every parameter needed to open the file must live in the file.
+  const iterations = new DataView(sealed.buffer, sealed.byteOffset + 8, 4).getUint32(0, false);
+  check('the header carries its own iteration count', iterations === DEFAULT_ITERATIONS);
+  check('each backup gets a fresh salt and iv', await (async () => {
+    const second = await encryptBackup(pass, payload);
+    return toBase64(sealed.slice(8, 40)) !== toBase64(second.slice(8, 40));
+  })());
+
+  // --- wiring.
+  check('the Worker seals before uploading, not after',
+    /body = toBase64\(await encryptBackup\(env\.BACKUP_PASSPHRASE, body\)\)/.test(indexSrc));
+  check('a sealed file is named so you can tell', /filename \+= '\.enc'/.test(indexSrc));
+  check('backups still work with no passphrase set',
+    /if \(env\.BACKUP_PASSPHRASE\) \{/.test(indexSrc));
+  check('restore accepts a sealed file', /if \(body\?\.encrypted\)/.test(indexSrc));
+  check('restore explains itself when the server has no passphrase',
+    /no BACKUP_PASSPHRASE is set on the server/.test(indexSrc));
+  check('settings reports whether backups are sealed',
+    /encrypted: Boolean\(env\.BACKUP_PASSPHRASE\)/.test(indexSrc));
+  check('the client detects a sealed file before parsing it as JSON',
+    /TODOBK01/.test(appSrc));
+
+  // The escape hatch. A backup only the app can open is not a backup.
+  const tool = read('scripts/decrypt-backup.mjs');
+  check('a standalone decrypt tool exists', /decryptBackup/.test(tool));
+  check('it shares the Worker’s implementation rather than copying it',
+    /from '\.\.\/src\/backup-crypto\.js'/.test(tool));
+  check('it never writes the passphrase anywhere', !/writeFile\(.*passphrase/i.test(tool));
+
+  const setter = read('scripts/set-backup-passphrase.mjs');
+  check('the passphrase setter pipes to wrangler on stdin',
+    /input: passphrase/.test(setter));
+  check('it makes you confirm you saved it', /"saved"/.test(setter));
+  check('it warns that loss is unrecoverable', /cannot be opened/.test(setter));
+}
+
 // --- run --------------------------------------------------------------------
 
 await testPushRoundTrip();
@@ -1626,6 +1745,7 @@ await testHideUntilDue();
 await testRestore();
 await testFolderNames();
 await testDemoLock();
+await testBackupEncryption();
 
 console.log(failures === 0 ? '\nAll checks passed.\n' : `\n${failures} check(s) failed.\n`);
 process.exit(failures === 0 ? 0 : 1);

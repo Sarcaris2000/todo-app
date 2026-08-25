@@ -87,7 +87,10 @@ async function api(path, options = {}) {
         + 'npx wrangler d1 execute todo --remote --file=./schema.sql',
       );
     }
-    throw new Error(data.error || `Request failed (${response.status})`);
+    // `detail` carries the actual exception. Dropping it turned a real bug
+    // into the word "Server error" and cost a round trip to diagnose.
+    const detail = data.detail && data.detail !== data.error ? ` - ${data.detail}` : '';
+    throw new Error(`${data.error || `Request failed (${response.status})`}${detail}`);
   }
 
   return data;
@@ -1660,10 +1663,19 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     $('restore-status').textContent = 'Reading...';
     try {
-      const backup = JSON.parse(await file.text());
+      const raw = await file.text();
+
+      // An encrypted backup is base64 armour around a binary container whose
+      // first eight bytes are the magic. Detect it here so the user gets a
+      // clear message rather than a JSON parse error on a wall of base64.
+      const sealed = /^TODOBK01/.test(atob(raw.slice(0, 24).replace(/\s+/g, '')).slice(0, 8))
+        || file.name.endsWith('.enc');
+
       const result = await api('/import', {
         method: 'POST',
-        body: JSON.stringify({ backup }),
+        body: JSON.stringify(sealed
+          ? { encrypted: raw }
+          : { backup: JSON.parse(raw) }),
       });
 
       const s = result.summary;
@@ -1672,8 +1684,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         .filter(([, n]) => n > 0)
         .map(([table, n]) => `${n} ${table}`);
       $('restore-status').textContent =
-        `From ${when}: ${parts.join(', ')}. ${s.openTasks} tasks still open.`;
-      pendingRestore = backup;
+        `${sealed ? 'Decrypted. ' : ''}From ${when}: ${parts.join(', ')}. `
+        + `${s.openTasks} tasks still open.`;
+      pendingRestore = sealed ? { encrypted: raw } : { backup: JSON.parse(raw) };
       $('restore-confirm').hidden = false;
     } catch (error) {
       $('restore-status').textContent = `Cannot use that file: ${error.message}`;
@@ -1690,7 +1703,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       const result = await api('/import', {
         method: 'POST',
-        body: JSON.stringify({ backup: pendingRestore, confirm: true }),
+        body: JSON.stringify({ ...pendingRestore, confirm: true }),
       });
       const undo = result.snapshot ? ` Previous state saved as ${result.snapshot}.` : '';
       $('restore-status').textContent = `Restored.${undo} Reloading...`;
