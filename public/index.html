@@ -391,6 +391,36 @@
     </section>
 
     <section class="setting-block">
+      <h3>Import and export</h3>
+      <p class="muted small">
+        Your tasks in formats other software reads. Separate from the backup
+        below &mdash; importing here <strong>adds</strong> tasks, it never
+        replaces what you have.
+      </p>
+      <button id="export-csv" class="btn full">Export tasks as CSV</button>
+      <button id="export-md" class="btn full" style="margin-top:8px">Export as a Markdown checklist</button>
+
+      <label class="field" style="margin-top:16px">
+        <span>Add tasks from a CSV file</span>
+        <input id="import-file" type="file" accept=".csv,.tsv,.txt,.md,.markdown,.json,.ics,.ical,.ifb,text/csv,text/plain,text/markdown,application/json,text/calendar">
+      </label>
+      <p class="muted small">
+        <strong>CSV</strong> (comma, semicolon or tab separated),
+        <strong>Markdown</strong> checklists, <strong>JSON</strong>,
+        <strong>.ics</strong> calendar files, or a plain list with one task per
+        line. Columns are matched by name, so exports from most task apps work
+        unchanged. A file it cannot read is refused rather than guessed at.
+      </p>
+      <p class="muted small">
+        An .ics file's to-dos are imported when it has any &mdash; that is what
+        Apple Reminders exports. A calendar with only events becomes one task
+        per event.
+      </p>
+      <p id="import-status" class="muted small"></p>
+      <button id="import-confirm" class="btn full" hidden>Add these tasks</button>
+    </section>
+
+    <section class="setting-block">
       <h3>Housekeeping</h3>
       <p class="muted small">
         Completed tasks are deleted once they reach this age. The generated

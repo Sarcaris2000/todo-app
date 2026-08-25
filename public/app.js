@@ -1731,6 +1731,83 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
+  const downloadFrom = async (path, filename) => {
+    const response = await fetch(path, { headers: { Authorization: `Bearer ${token}` } });
+    if (!response.ok) throw new Error(`Export failed (${response.status})`);
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  $('export-csv').addEventListener('click', async () => {
+    try { await downloadFrom('/api/export/tasks?format=csv', `tasks-${config.today}.csv`); }
+    catch (error) { toast(error.message); }
+  });
+
+  $('export-md').addEventListener('click', async () => {
+    try { await downloadFrom('/api/export/tasks?format=markdown', `tasks-${config.today}.md`); }
+    catch (error) { toast(error.message); }
+  });
+
+  // Two steps, same as restore: show what was understood, then write.
+  let pendingImport = null;
+
+  $('import-file').addEventListener('change', async (event) => {
+    const file = event.target.files?.[0];
+    pendingImport = null;
+    $('import-confirm').hidden = true;
+    if (!file) { $('import-status').textContent = ''; return; }
+
+    $('import-status').textContent = 'Reading...';
+    try {
+      const csv = await file.text();
+      const result = await api('/import/tasks', {
+        method: 'POST',
+        body: JSON.stringify({ csv }),
+      });
+
+      const names = result.sample.map((t) => t.title).join(', ');
+      const skipped = result.skipped.length
+        ? ` ${result.skipped.length} line(s) skipped (no title).`
+        : '';
+      const kind = result.format === 'ics'
+        ? `calendar (${result.icsKind === 'VTODO' ? 'to-dos' : 'events'})`
+        : ({ csv: 'CSV', markdown: 'Markdown', json: 'JSON' }[result.format] || result.format);
+      $('import-status').textContent =
+        `Read as ${kind}: ${result.count} task(s) - e.g. ${names}.${skipped}`;
+      pendingImport = csv;
+      $('import-confirm').hidden = false;
+      $('import-confirm').textContent = `Add ${result.count} task(s)`;
+    } catch (error) {
+      $('import-status').textContent = error.message;
+    }
+  });
+
+  $('import-confirm').addEventListener('click', async () => {
+    if (!pendingImport) return;
+    const button = $('import-confirm');
+    button.disabled = true;
+    try {
+      const result = await api('/import/tasks', {
+        method: 'POST',
+        body: JSON.stringify({ csv: pendingImport, confirm: true }),
+      });
+      $('import-status').textContent = `Added ${result.added} task(s).`;
+      $('import-file').value = '';
+      button.hidden = true;
+      pendingImport = null;
+      await refresh();
+    } catch (error) {
+      $('import-status').textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
+
   $('export-now').addEventListener('click', async () => {
     $('export-now').disabled = true;
     try {

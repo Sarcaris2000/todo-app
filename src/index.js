@@ -25,6 +25,7 @@ import {
   encryptBackup, decryptBackup, isEncryptedBackup, toBase64, fromBase64,
 } from './backup-crypto.js';
 import { seedDemo } from './demo.js';
+import { tasksToCsv, tasksToMarkdown, importTasks } from './interchange.js';
 import {
   checkLockout, recordFailure, clearFailures, clientIp,
   createSession, resolveSession, listSessions, deleteSession,
@@ -1249,6 +1250,90 @@ async function handleApi(request, env, url) {
     if (env.DEMO_MODE !== 'true') return json({ error: 'Not found' }, 404);
     const result = await seedDemo(env, today);
     return json({ ok: true, ...result });
+  }
+
+  // --- import / export -------------------------------------------------------
+  //
+  // Deliberately separate from backup/restore: this is the tasks only, in
+  // formats other software reads, and importing ADDS rather than replaces.
+  if (path === '/api/export/tasks' && method === 'GET') {
+    const format = url.searchParams.get('format') === 'markdown' ? 'markdown' : 'csv';
+    const { results } = await env.DB.prepare('SELECT * FROM tasks ORDER BY deadline, title').all();
+    const labels = await folderLabels(env);
+
+    const body = format === 'markdown'
+      ? tasksToMarkdown(results ?? [], labels, today)
+      : tasksToCsv(results ?? [], labels);
+
+    return new Response(body, {
+      headers: {
+        'Content-Type': format === 'markdown'
+          ? 'text/markdown; charset=utf-8'
+          : 'text/csv; charset=utf-8',
+        'Content-Disposition':
+          `attachment; filename="tasks-${today}.${format === 'markdown' ? 'md' : 'csv'}"`,
+        'Cache-Control': 'no-store',
+      },
+    });
+  }
+
+  if (path === '/api/import/tasks' && method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const text = String(body?.csv ?? '');
+    if (!text.trim()) return json({ error: 'That file was empty' }, 400);
+
+    const labels = await folderLabels(env);
+
+    let parsed;
+    try {
+      parsed = importTasks(text, { categories: CATEGORIES, labels, timeZone: timezone });
+    } catch (error) {
+      // A file we cannot read is refused outright. Guessing produces tasks
+      // called "## Work", which is a worse outcome than saying no.
+      return json({ error: String(error.message || error).slice(0, 300) }, 400);
+    }
+
+    if (!parsed.tasks.length) {
+      return json({
+        error: 'No usable tasks in that file. It needs a "title" column, or one task per line.',
+        skipped: parsed.skipped.slice(0, 5),
+      }, 400);
+    }
+
+    // Look first, write second - same two-step as restore, because a silent
+    // bulk insert into the wrong folder is tedious to undo by hand.
+    if (body.confirm !== true) {
+      return json({
+        ok: true,
+        preview: true,
+        count: parsed.tasks.length,
+        format: parsed.format,
+        icsKind: parsed.icsKind,
+        skipped: parsed.skipped,
+        columns: Object.keys(parsed.columns ?? {}),
+        sample: parsed.tasks.slice(0, 3).map((t) => ({
+          title: t.title, folder: labels[t.category], deadline: t.deadline,
+        })),
+      });
+    }
+
+    const timestamp = nowISO();
+    let added = 0;
+    for (const t of parsed.tasks) {
+      await env.DB.prepare(
+        `INSERT INTO tasks (id, title, notes, category, deadline, priority, estimate_minutes,
+                            status, recur, subtasks, hide_until_due, created_at, updated_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+      ).bind(
+        newId(), t.title, t.notes, t.category, t.deadline, t.priority,
+        t.estimate_minutes, t.status, cleanRecur(t.recur),
+        JSON.stringify(t.subtasks), timestamp, timestamp,
+        t.status === 'done' ? timestamp : null,
+      ).run();
+      added++;
+    }
+
+    return json({ ok: true, added, skipped: parsed.skipped });
   }
 
   // --- restore ---------------------------------------------------------------

@@ -23,6 +23,9 @@ copy to your own Cloudflare account, and your data lives in your database.
 - **Recurring tasks, snooze, subtasks, search**, natural-language quick add, a
   weekly workout plan with streaks, and tasks that stay hidden until the day
   they are actually actionable.
+- **Import and export that other software understands** - CSV, Markdown
+  checklists, JSON, and iCalendar. Coming from another app, or leaving for one,
+  should not mean retyping anything.
 - **Weekly backups to your own Google Drive**, encrypted before they leave, with
   a restore path that has been tested rather than assumed.
 
@@ -86,16 +89,50 @@ data and resets every six hours. Give it its own passphrase and its own VAPID
 keys — the demo's passphrase is public by design. The lock screen prefills the
 passphrase when the hostname begins with `demo.`.
 
+## Getting your tasks in and out
+
+Settings -> Import and export. Deliberately separate from backup and restore:
+**importing adds tasks, it never replaces what you have.**
+
+Export as **CSV** (opens in any spreadsheet) or as a **Markdown checklist**
+(paste into notes, an email, or an issue).
+
+Import accepts:
+
+| Format | Notes |
+|---|---|
+| CSV | comma, semicolon, tab or pipe separated - the delimiter is detected |
+| Markdown | `## Heading` becomes a folder, `- [ ]` a task, an indented `- [ ]` a subtask |
+| JSON | a bare array, `{"tasks": [...]}`, or one of this app's own backups |
+| iCalendar | `.ics` - `VTODO` items preferred, falling back to events |
+| Plain text | one task per line, no header needed |
+
+Columns are matched by name against a table of aliases, so exports from most
+task apps work unchanged - Todoist's `CONTENT`/`DESCRIPTION`/`PRIORITY`/`DATE`,
+for instance. Folder names are matched against whatever you have renamed yours
+to.
+
+`.ics` matters more than it looks: `VTODO` is iCalendar's own to-do component
+and is what Apple Reminders, Thunderbird, and CalDAV clients export, which makes
+it the nearest thing to a standard interchange format for tasks. Note that RFC
+5545 priority runs 1 (highest) to 9 (lowest) - the opposite direction from most
+apps' UI.
+
+**A file it cannot read is refused**, with a message saying what is supported.
+An earlier version guessed, and turned a Markdown heading into a task called
+`## Work`; silently inventing tasks is a worse failure than saying no.
+
 ## Tests
 
 ```bash
 npm test
 ```
 
-Around 460 checks covering the push encryption against an independent
+Around 530 checks covering the push encryption against an independent
 decryption, ranking, recurrence, the iCalendar parser, free-window maths, auth
 and lockout, the restore path against a real SQLite database, backup encryption
-including tamper detection, and a set of frontend structure assertions that
+including tamper detection, every import format including the ones that used to
+produce silent garbage, and a set of frontend structure assertions that
 exist because each one caught a real bug once.
 
 No network access, no fixtures to maintain. Run it before every deploy.

@@ -168,3 +168,57 @@ export function parseIcs(text, { maxEvents = 2000, timeZone = 'UTC' } = {}) {
 
   return events;
 }
+
+/**
+ * VTODO blocks - iCalendar's own representation of a to-do.
+ *
+ * This is what Apple Reminders, Thunderbird, Nextcloud Tasks and any CalDAV
+ * client export, so it is the closest thing to a standard interchange format
+ * for tasks. parseIcs() above deliberately ignores them: a schedule feed's
+ * VTODOs, if it had any, are not clinical assignments.
+ *
+ * Returns raw-ish records; mapping them onto this app's task shape is the
+ * interchange layer's job, not the parser's.
+ */
+export function parseIcsTodos(text, { maxTodos = 2000, timeZone = 'UTC' } = {}) {
+  const todos = [];
+  let current = null;
+
+  for (const line of unfold(text).split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    if (trimmed === 'BEGIN:VTODO') { current = {}; continue; }
+
+    if (trimmed === 'END:VTODO') {
+      if (current?.summary) todos.push(current);
+      current = null;
+      if (todos.length >= maxTodos) break;
+      continue;
+    }
+
+    if (!current) continue;
+
+    const { name, params, value } = parseLine(trimmed);
+    switch (name) {
+      case 'SUMMARY': current.summary = unescapeText(value); break;
+      case 'DESCRIPTION': current.description = unescapeText(value); break;
+      case 'DUE': current.due = parseIcsDate(value, params, timeZone); break;
+      // Some exporters put the date on DTSTART and leave DUE empty.
+      case 'DTSTART': current.start = parseIcsDate(value, params, timeZone); break;
+      case 'STATUS': current.status = String(value).trim().toUpperCase(); break;
+      case 'COMPLETED': current.completed = parseIcsDate(value, params, timeZone); break;
+      case 'PRIORITY': current.priority = Number(value); break;
+      case 'CATEGORIES': current.categories = unescapeText(value); break;
+      case 'PERCENT-COMPLETE': current.percent = Number(value); break;
+      default: break;
+    }
+  }
+
+  return todos;
+}
+
+/** True if this text is an iCalendar file at all. */
+export function isIcs(text) {
+  return /^\s*BEGIN:VCALENDAR/im.test(String(text).slice(0, 2000));
+}

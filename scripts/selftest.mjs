@@ -1728,6 +1728,206 @@ async function testBackupEncryption() {
   check('it warns that loss is unrecoverable', /cannot be opened/.test(setter));
 }
 
+// --- 17. import and export ----------------------------------------------------
+
+async function testInterchange() {
+  console.log('\nImport and export');
+
+  const { tasksToCsv, tasksToMarkdown, parseCsv, rowsToTasks, CSV_COLUMNS,
+    importTasks, detectFormat, sniffDelimiter } = await import('../src/interchange.js');
+  const read = (rel) => readFileSync(join(ROOT, rel), 'utf8');
+  const indexSrc = read('src/index.js');
+  const appSrc = read('public/app.js');
+  const htmlSrc = read('public/index.html');
+
+  const labels = { work: 'Clinical', personal: 'Home', fitness: 'Training' };
+  const tasks = [
+    { title: 'Call Smith, then Jones', notes: 'Says "urgent"', category: 'work',
+      deadline: '2026-09-01', priority: 1, estimate_minutes: 30, status: 'open',
+      recur: null, subtasks: '[{"text":"Find number","done":true}]' },
+    { title: 'Line\nbreak', notes: '', category: 'personal', deadline: null,
+      priority: 2, estimate_minutes: null, status: 'done', recur: 'weekly', subtasks: '[]' },
+  ];
+
+  // --- the values that break naive CSV code.
+  const csv = tasksToCsv(tasks, labels);
+  const back = rowsToTasks(parseCsv(csv), { labels });
+  check('a comma inside a title survives', back.tasks[0].title === 'Call Smith, then Jones');
+  check('a quote inside notes survives', back.tasks[0].notes === 'Says "urgent"');
+  check('a newline inside a title survives', back.tasks[1].title === 'Line\nbreak');
+  check('folder labels map back to ids', back.tasks[0].category === 'work');
+  check('completed status survives', back.tasks[1].status === 'done');
+  check('subtask done-state survives',
+    back.tasks[0].subtasks[0].done === true && back.tasks[0].subtasks[0].text === 'Find number');
+  check('the header names every column', parseCsv(csv)[0].join(',') === CSV_COLUMNS.join(','));
+
+  // --- other people's exports.
+  const todoist = rowsToTasks(parseCsv(
+    'TYPE,CONTENT,DESCRIPTION,PRIORITY,DATE\ntask,Renew licence,Board paperwork,1,2026-09-15\n'));
+  check('a Todoist-shaped export maps by column name',
+    todoist.tasks[0].title === 'Renew licence' && todoist.tasks[0].deadline === '2026-09-15');
+  check('its description becomes notes', todoist.tasks[0].notes === 'Board paperwork');
+
+  const human = rowsToTasks(parseCsv('title,due\nBook flights,Sep 20 2026\n'));
+  check('a human-written date is understood', human.tasks[0].deadline === '2026-09-20');
+
+  const bare = rowsToTasks(parseCsv('Mow the lawn\nCall the plumber\n'));
+  check('a bare list with no header works', bare.tasks.length === 2
+    && bare.tasks[0].title === 'Mow the lawn');
+
+  // --- one bad row must not cost the whole file.
+  const messy = rowsToTasks(parseCsv('title,due\nGood,2026-09-01\n,2026-09-02\nAlso good,\n'));
+  check('a row with no title is skipped, not fatal', messy.tasks.length === 2);
+  check('the skip reports its line number', messy.skipped[0].line === 3);
+
+  check('an unknown folder falls back rather than inventing one',
+    rowsToTasks(parseCsv('title,folder\nX,Nonsense\n')).tasks[0].category === 'personal');
+  check('an absurd estimate is dropped',
+    rowsToTasks(parseCsv('title,estimate\nX,not a number\n')).tasks[0].estimate_minutes === null);
+
+  // --- markdown is for reading, not round-tripping.
+  const md = tasksToMarkdown(tasks, labels, '2026-08-25');
+  check('markdown groups by folder', /## Clinical/.test(md));
+  check('markdown lists open tasks as checkboxes', /- \[ \] Call Smith/.test(md));
+  check('markdown separates completed', /## Completed \(1\)/.test(md));
+  check('markdown nests subtasks', /  - \[x\] Find number/.test(md));
+
+  // --- the endpoints, and the distinction that matters.
+  check('export serves csv and markdown', /format === 'markdown'/.test(indexSrc)
+    && /text\/csv; charset=utf-8/.test(indexSrc));
+  check('importing tasks INSERTs rather than deleting',
+    /INSERT INTO tasks \(id, title, notes, category, deadline, priority, estimate_minutes,\s*\n\s*status, recur, subtasks, hide_until_due/.test(indexSrc));
+  const importBlock = indexSrc.slice(indexSrc.indexOf("path === '/api/import/tasks'"),
+    indexSrc.indexOf("// --- restore"));
+  check('the task import never issues a DELETE', !/DELETE/.test(importBlock));
+  check('it previews before writing', /body\.confirm !== true/.test(importBlock));
+  check('recurrence from a foreign file is validated',
+    /cleanRecur\(t\.recur\)/.test(importBlock));
+
+  check('settings offers both exports', /id="export-csv"/.test(htmlSrc)
+    && /id="export-md"/.test(htmlSrc));
+  check('settings offers the additive import', /id="import-file"/.test(htmlSrc));
+  check('the UI says import adds rather than replaces',
+    /adds<\/strong> tasks, it never/.test(htmlSrc));
+  check('the client confirms before importing', /confirm: true/.test(appSrc));
+
+  // --- formats beyond comma-separated. Each of these silently produced
+  // --- garbage tasks before detection existed: a Markdown heading became a
+  // --- task called "## Work", and a tab-separated file became one column.
+  check('a semicolon file is detected', sniffDelimiter('title;due\nX;2026-01-01') === ';');
+  check('a tab file is detected', sniffDelimiter('title\tdue\nX\t2026-01-01') === '\t');
+  check('a comma inside quotes does not win the sniff',
+    sniffDelimiter('"Smith, Jones";due') === ';');
+
+  check('markdown is recognised',
+    detectFormat('## Work\n- [ ] Renew licence\n- [x] Sign reports') === 'markdown');
+  check('json is recognised', detectFormat('[{"title":"X"}]') === 'json');
+  check('a spreadsheet with one stray checkbox is still csv',
+    detectFormat('title,notes\nA,b\nC,d\nE,f\nG,- [ ] h') === 'csv');
+
+  const semi = importTasks('title;due\nMow lawn;2026-09-01\nCall plumber;', { labels });
+  check('a semicolon export imports correctly',
+    semi.tasks.length === 2 && semi.tasks[0].title === 'Mow lawn');
+
+  const mdIn = importTasks('# Tasks\n\n## Clinical\n\n- [ ] Renew licence _(due 2026-09-15, 30m, high)_\n'
+    + '  - [x] Find form\n- [x] Sign reports\n\n## Completed (1)\n\n- [x] Old thing', { labels });
+  check('markdown headings become folders, not tasks',
+    mdIn.tasks.every((t) => !t.title.startsWith('#')));
+  check('markdown yields the right task count', mdIn.tasks.length === 3, `got ${mdIn.tasks.length}`);
+  check('a markdown folder heading is applied', mdIn.tasks[0].category === 'work');
+  check('markdown metadata is read back',
+    mdIn.tasks[0].deadline === '2026-09-15' && mdIn.tasks[0].estimate_minutes === 30
+    && mdIn.tasks[0].priority === 1);
+  check('an indented checkbox becomes a subtask',
+    mdIn.tasks[0].subtasks.length === 1 && mdIn.tasks[0].subtasks[0].done === true);
+  check('a completed markdown item keeps its status', mdIn.tasks[1].status === 'done');
+
+  const json = importTasks('[{"title":"Renew licence","deadline":"2026-09-15"}]', { labels });
+  check('a JSON array imports', json.tasks.length === 1 && json.tasks[0].deadline === '2026-09-15');
+  const wrapped = importTasks('{"app":"todo","data":{"tasks":[{"title":"From backup"}]}}', { labels });
+  check('our own backup shape is accepted as JSON', wrapped.tasks[0].title === 'From backup');
+
+  // Refusing is a feature. Guessing produced nonsense tasks nobody asked for.
+  await (async () => {
+    let refused = false;
+    try { importTasks('lorem {} <<>> ;;;\n{"nope":1}\n### heading'); } catch { refused = true; }
+    check('an unreadable file is refused, not guessed at', refused);
+  })();
+  await (async () => {
+    let refused = false;
+    try { importTasks('[{"nope":1}]'); } catch { refused = true; }
+    check('JSON objects with no title are refused', refused);
+  })();
+
+  // Both exports must survive a round trip, estimate included - the alias
+  // table normalised headers but not itself, so estimates were silently lost.
+  const one = { title: 'Renew licence', notes: '', category: 'work', deadline: '2026-09-15',
+    priority: 1, estimate_minutes: 30, status: 'open', recur: null,
+    subtasks: '[{"text":"Find form","done":true}]' };
+  for (const [name, text] of [
+    ['csv', tasksToCsv([one], labels)],
+    ['markdown', tasksToMarkdown([one], labels, '2026-08-25')],
+  ]) {
+    const t = importTasks(text, { labels }).tasks[0];
+    check(`${name} round-trips the estimate`, t.estimate_minutes === 30);
+    check(`${name} round-trips the deadline`, t.deadline === '2026-09-15');
+    check(`${name} round-trips the folder`, t.category === 'work');
+    check(`${name} round-trips the subtask`, t.subtasks.length === 1);
+  }
+
+  check('the endpoint refuses unreadable files with a 400',
+    /A file we cannot read is refused outright/.test(indexSrc));
+  check('the picker accepts every supported extension',
+    /\.csv,\.tsv,\.txt,\.md,\.markdown,\.json,\.ics/.test(htmlSrc));
+
+  // --- iCalendar. VTODO is the standard's own to-do component and is what
+  // --- Apple Reminders and any CalDAV client export.
+  const ics = (...body) => ['BEGIN:VCALENDAR', 'VERSION:2.0', ...body, 'END:VCALENDAR'].join('\r\n');
+
+  const todoFile = ics(
+    'BEGIN:VTODO', 'UID:1', 'SUMMARY:Renew board certification',
+    'DESCRIPTION:Gather CME first', 'DUE;VALUE=DATE:20260915', 'PRIORITY:1',
+    'CATEGORIES:Clinical', 'STATUS:NEEDS-ACTION', 'END:VTODO',
+    'BEGIN:VTODO', 'UID:2', 'SUMMARY:Buy milk', 'STATUS:COMPLETED',
+    'PERCENT-COMPLETE:100', 'END:VTODO',
+    'BEGIN:VTODO', 'UID:3', 'SUMMARY:Low thing', 'PRIORITY:9', 'END:VTODO');
+
+  check('an ics file is detected', detectFormat(todoFile) === 'ics');
+  const todos = importTasks(todoFile, { labels });
+  check('VTODO is preferred over events', todos.icsKind === 'VTODO');
+  check('VTODO summary becomes the title', todos.tasks[0].title === 'Renew board certification');
+  check('VTODO description becomes notes', todos.tasks[0].notes === 'Gather CME first');
+  check('a VALUE=DATE due date is read', todos.tasks[0].deadline === '2026-09-15');
+  check('CATEGORIES maps to a renamed folder', todos.tasks[0].category === 'work');
+  // RFC 5545 runs 1 (highest) to 9 (lowest), which is neither our scale nor
+  // any app's UI - getting this backwards would silently invert priorities.
+  check('RFC priority 1 is high', todos.tasks[0].priority === 1);
+  check('RFC priority 9 is low', todos.tasks[2].priority === 3);
+  check('STATUS:COMPLETED becomes done', todos.tasks[1].status === 'done');
+
+  const eventFile = ics(
+    'BEGIN:VEVENT', 'UID:e1', 'SUMMARY:Grand Rounds', 'DTSTART;VALUE=DATE:20260901',
+    'DTEND;VALUE=DATE:20260902', 'END:VEVENT',
+    'BEGIN:VEVENT', 'UID:e2', 'SUMMARY:Teaching', 'DTSTART:20260903T120000Z',
+    'DTEND:20260903T130000Z', 'END:VEVENT');
+  const events = importTasks(eventFile, { labels });
+  check('a calendar with no to-dos falls back to events', events.icsKind === 'VEVENT');
+  check('each event becomes one task', events.tasks.length === 2);
+  check('the event date becomes the deadline', events.tasks[0].deadline === '2026-09-01');
+
+  await (async () => {
+    let refused = false;
+    try { importTasks(ics()); } catch { refused = true; }
+    check('an empty calendar is refused, not imported as nothing', refused);
+  })();
+
+  // The schedule sync must keep ignoring VTODOs - a feed's to-dos are not
+  // clinical assignments.
+  const { parseIcs: parseEvents } = await import('../src/ics.js');
+  check('the schedule parser still ignores VTODO',
+    parseEvents(todoFile).length === 0);
+}
+
 // --- run --------------------------------------------------------------------
 
 await testPushRoundTrip();
@@ -1746,6 +1946,7 @@ await testRestore();
 await testFolderNames();
 await testDemoLock();
 await testBackupEncryption();
+await testInterchange();
 
 console.log(failures === 0 ? '\nAll checks passed.\n' : `\n${failures} check(s) failed.\n`);
 process.exit(failures === 0 ? 0 : 1);
