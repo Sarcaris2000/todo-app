@@ -38,6 +38,8 @@ function applyFolderLabels(labels) {
     if (tab) tab.textContent = FOLDER_LABELS[id];
     const option = document.getElementById(`opt-${id}`);
     if (option) option.textContent = FOLDER_LABELS[id];
+    const camOption = document.getElementById(`cam-opt-${id}`);
+    if (camOption) camOption.textContent = FOLDER_LABELS[id];
   }
 }
 const RECUR_LABELS = {
@@ -1393,6 +1395,8 @@ async function start() {
   config = { ...config, ...(await api('/config')) };
   applyFolderLabels(config.folderLabels);
 
+  if (config.camera) $('camera-row').hidden = false;
+
   if (config.demo) {
     $('demo-banner').hidden = false;
     document.body.classList.add('is-demo');
@@ -1717,6 +1721,116 @@ document.addEventListener('DOMContentLoaded', async () => {
   for (const id of ['work', 'personal', 'fitness']) {
     $(`s-folder-${id}`).addEventListener('input', checkFolderWidth);
   }
+
+  // --- camera capture -------------------------------------------------------
+
+  /**
+   * Shrink before uploading. A modern phone photo is 4 MB and about 4000px
+   * wide; the reader gains nothing above ~1568px, and the smaller payload is
+   * the difference between a two-second round trip and a twenty-second one on
+   * hospital wifi.
+   */
+  async function shrinkImage(file, maxEdge = 1568) {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close?.();
+
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.82));
+    const buffer = await blob.arrayBuffer();
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return { base64: btoa(binary), mediaType: 'image/jpeg', bytes: bytes.length };
+  }
+
+  let pendingReading = null;
+
+  function showCameraResult(message, { warn = false, fields = false } = {}) {
+    $('camera-result').hidden = false;
+    $('camera-result').classList.toggle('is-warn', warn);
+    $('camera-status').textContent = message;
+    $('camera-fields').hidden = !fields;
+  }
+
+  $('camera-input').addEventListener('change', async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    pendingReading = null;
+    showCameraResult('Reading the photo...');
+
+    try {
+      const { base64, mediaType } = await shrinkImage(file);
+      const result = await api('/vision', {
+        method: 'POST',
+        body: JSON.stringify({ image: base64, mediaType }),
+      });
+
+      if (!result.ok) {
+        showCameraResult(result.error, { warn: true });
+        return;
+      }
+
+      const r = result.reading;
+      pendingReading = r;
+
+      $('cam-title').value = r.title;
+      $('cam-date').value = r.date || '';
+      $('cam-notes').value = [r.location, r.notes].filter(Boolean).join(' - ');
+      $('cam-category').value = folder === 'all' ? 'work' : folder;
+
+      const when = r.date ? `${r.date}${r.time ? ` at ${r.time}` : ''}` : 'no date found';
+      const unsure = r.confidence === 'low'
+        ? ' The photo was hard to read, so check this carefully.'
+        : '';
+      showCameraResult(`Read as: ${r.title} - ${when}.${unsure}`,
+        { warn: r.confidence === 'low', fields: true });
+    } catch (error) {
+      showCameraResult(`Could not read that photo: ${error.message}`, { warn: true });
+    }
+  });
+
+  $('cam-cancel').addEventListener('click', () => {
+    pendingReading = null;
+    $('camera-result').hidden = true;
+    $('camera-fields').hidden = true;
+  });
+
+  $('cam-save').addEventListener('click', async () => {
+    const title = $('cam-title').value.trim();
+    if (!title) { showCameraResult('Give it a title first.', { warn: true, fields: true }); return; }
+
+    const button = $('cam-save');
+    button.disabled = true;
+    try {
+      // Created through the ordinary endpoint, so a photographed task goes
+      // through exactly the same validation as a typed one.
+      await api('/tasks', {
+        method: 'POST',
+        body: JSON.stringify({
+          title,
+          notes: $('cam-notes').value.trim(),
+          category: $('cam-category').value,
+          deadline: $('cam-date').value || null,
+          priority: 2,
+        }),
+      });
+      pendingReading = null;
+      $('camera-result').hidden = true;
+      $('camera-fields').hidden = true;
+      toast('Added from photo');
+      await refresh();
+    } catch (error) {
+      showCameraResult(error.message, { warn: true, fields: true });
+    } finally {
+      button.disabled = false;
+    }
+  });
 
   $('demo-reset').addEventListener('click', async () => {
     const button = $('demo-reset');

@@ -1928,6 +1928,184 @@ async function testInterchange() {
     parseEvents(todoFile).length === 0);
 }
 
+// --- 18. camera capture -------------------------------------------------------
+
+async function testVision() {
+  console.log('\nCamera capture');
+
+  const { readImage, DEFAULT_MODEL, MAX_IMAGE_BYTES } = await import('../src/vision.js');
+  const read = (rel) => readFileSync(join(ROOT, rel), 'utf8');
+  const visionSrc = read('src/vision.js');
+  const indexSrc = read('src/index.js');
+  const appSrc = read('public/app.js');
+  const htmlSrc = read('public/index.html');
+
+  const env = { ANTHROPIC_API_KEY: 'test-key' };
+  const realFetch = globalThis.fetch;
+  const args = { base64: 'AAAA', mediaType: 'image/jpeg', todayISO: '2026-08-25', timezone: 'America/Chicago' };
+
+  const stub = (handler) => { globalThis.fetch = handler; };
+  const toolReply = (input) => new Response(JSON.stringify({
+    stop_reason: 'tool_use',
+    content: [{ type: 'tool_use', name: 'record_what_you_see', input }],
+  }), { status: 200 });
+
+  const FULL = {
+    found: true, kind: 'event', title: 'Grand Rounds - ILD', date: '2026-09-15',
+    time: '08:00', end_time: '09:00', location: 'Moore Auditorium', notes: '',
+    confidence: 'high', contains_personal_data: false,
+  };
+
+  try {
+    // --- request shape. Getting these wrong fails only in production.
+    let sent = null;
+    stub(async (url, opts) => { sent = { url, opts: JSON.parse(opts.body), headers: opts.headers }; return toolReply(FULL); });
+    const ok = await readImage(env, args);
+
+    check('a clean reading comes back ok', ok.ok === true, ok.error);
+    check('the title is carried through', ok.data.title === 'Grand Rounds - ILD');
+    check('the date is carried through', ok.data.date === '2026-09-15');
+    check('it posts to the messages endpoint',
+      sent.url === 'https://api.anthropic.com/v1/messages');
+    check('the api version header is sent', sent.headers['anthropic-version'] === '2023-06-01');
+    check('the key travels in x-api-key, not Authorization',
+      sent.headers['x-api-key'] === 'test-key' && !sent.headers.Authorization);
+    check('the model defaults to Opus 5', sent.opts.model === 'claude-opus-5' && DEFAULT_MODEL === 'claude-opus-5');
+    check('the tool is forced, so the reply is always structured',
+      sent.opts.tool_choice.type === 'tool' && sent.opts.tool_choice.name === 'record_what_you_see');
+    check('the tool schema is strict', sent.opts.tools[0].strict === true);
+    check('strict schemas must close additionalProperties',
+      sent.opts.tools[0].input_schema.additionalProperties === false);
+    // Disabling thinking on Opus 5 can put a tool call into visible text
+    // instead of a tool_use block; low effort is the supported way to keep it
+    // cheap.
+    check('thinking is left on, with effort lowered instead',
+      !('thinking' in sent.opts) && sent.opts.output_config.effort === 'low');
+    check('the image is sent as base64 with its media type',
+      sent.opts.messages[0].content[0].source.media_type === 'image/jpeg');
+    check("today's date is given so relative dates resolve",
+      /2026-08-25/.test(sent.opts.messages[0].content[1].text));
+
+    // --- the guardrail this feature exists under.
+    stub(async () => toolReply({ ...FULL, contains_personal_data: true }));
+    const flagged = await readImage(env, args);
+    check('an image with personal details is flagged', flagged.data.containsPersonalData === true);
+    check('the endpoint refuses a flagged image rather than filing it',
+      /blocked: true/.test(indexSrc) && /image has been discarded/.test(indexSrc));
+    check('the schema tells the reader to err towards flagging',
+      /Err towards true/.test(visionSrc));
+    check('a flagged reading is never transcribed into other fields',
+      /do not transcribe such/i.test(visionSrc));
+
+    // --- failure modes.
+    stub(async () => new Response(JSON.stringify({ stop_reason: 'refusal', content: [] }), { status: 200 }));
+    const refused = await readImage(env, args);
+    check('a safety refusal is handled, not treated as success', refused.ok === false);
+
+    stub(async () => new Response(JSON.stringify({ error: { message: 'overloaded' } }), { status: 529 }));
+    const failed = await readImage(env, args);
+    check('an API error surfaces its message', failed.ok === false && /overloaded/.test(failed.error));
+
+    stub(async () => { throw new Error('network down'); });
+    const offline = await readImage(env, args);
+    check('a network failure does not throw', offline.ok === false && /Could not reach/.test(offline.error));
+
+    stub(async () => toolReply({ ...FULL, found: false, kind: 'none', title: '' }));
+    const nothing = await readImage(env, args);
+    check('an unreadable photo reports found=false', nothing.data.found === false);
+
+    // --- never trust the returned shape, even under strict tool use.
+    stub(async () => toolReply({ ...FULL, date: 'next Tuesday', time: '25:99', confidence: 'certain' }));
+    const junk = await readImage(env, args);
+    check('a non-ISO date is dropped rather than stored', junk.data.date === null);
+    check('an impossible time is dropped', junk.data.time === null);
+    check('an unknown confidence falls back to low', junk.data.confidence === 'low');
+
+    const noKey = await readImage({}, args);
+    check('a missing API key is reported clearly',
+      noKey.ok === false && /ANTHROPIC_API_KEY/.test(noKey.error));
+
+    const huge = await readImage(env, { ...args, base64: 'A'.repeat(MAX_IMAGE_BYTES * 2) });
+    check('an oversized image is rejected before the call', huge.ok === false);
+
+    const wrongType = await readImage(env, { ...args, mediaType: 'application/pdf' });
+    check('a non-image type is rejected', wrongType.ok === false);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  // --- wiring and privacy posture.
+  check('the endpoint creates nothing itself',
+    !/INSERT INTO tasks/.test(indexSrc.slice(indexSrc.indexOf("path === '/api/vision'"),
+      indexSrc.indexOf('// --- import / export'))));
+  check('the photo is never written to the database',
+    /never\s*\n?\s*\/\/\s*written to the database/.test(indexSrc)
+    || /held only for the duration of this request/.test(indexSrc));
+
+  // app.js wires listeners onto these at load; a missing one throws and takes
+  // the whole app down. The camera markup silently failed to insert once
+  // already, so assert every id the client reaches for.
+  for (const id of ['camera-row', 'camera-input', 'camera-result', 'camera-status',
+    'camera-fields', 'cam-title', 'cam-date', 'cam-category', 'cam-notes',
+    'cam-save', 'cam-cancel']) {
+    check(`the markup defines #${id}`, htmlSrc.includes(`id="${id}"`));
+  }
+  check('the camera button only appears where a key is set',
+    /camera: Boolean\(env\.ANTHROPIC_API_KEY\)/.test(indexSrc) && /if \(config\.camera\)/.test(appSrc));
+  check('capture opens the camera rather than the photo library',
+    /capture="environment"/.test(htmlSrc));
+  check('the photo is shrunk before upload', /createImageBitmap/.test(appSrc)
+    && /1568/.test(appSrc));
+  check('the confirmed task goes through the ordinary create path',
+    /api\('\/tasks', \{\s*\n\s*method: 'POST'/.test(appSrc));
+  check('a low-confidence reading is called out', /hard to read/.test(appSrc));
+
+  // Zero runtime dependencies is a property of this project, not an accident.
+  check('no SDK dependency was introduced',
+    !/@anthropic-ai\/sdk/.test(read('package.json')));
+
+  // --- the spend ceiling. Every reading costs money on a real card, and the
+  // --- demo is public, so this is the difference between a feature and a bill.
+  const capBlock = indexSrc.slice(indexSrc.indexOf("path === '/api/vision'"),
+    indexSrc.indexOf('// --- import / export'));
+  check('a daily limit is enforced before the API is called',
+    capBlock.indexOf('used >= limit') < capBlock.indexOf('readImage(env'));
+  check('the counter resets on a new day', /usedDay === today \? Number/.test(capBlock));
+  check('exceeding the limit returns 429, not a silent failure',
+    /is the daily limit[\s\S]{0,80}429/.test(capBlock));
+  check('the demo gets a lower ceiling by default',
+    /env\.DEMO_MODE === 'true' \? 25 : 50/.test(capBlock));
+  // The published repo ships wrangler.demo.example.toml; a live install renames
+  // it. Read whichever exists rather than crashing the suite on a clone.
+  const demoConfig = ['wrangler.demo.toml', 'wrangler.demo.example.toml']
+    .map((f) => { try { return read(f); } catch { return null; } })
+    .find(Boolean) ?? '';
+  check('a demo config is present to check', demoConfig.length > 0);
+  check('the demo reads on the cheaper model',
+    /VISION_MODEL = "claude-haiku-4-5"/.test(demoConfig));
+  check('the demo ceiling is set explicitly too',
+    /VISION_DAILY_LIMIT = "25"/.test(demoConfig));
+  check('the usage counter is not restored from a backup',
+    /'vision_day', 'vision_used'/.test(read('src/restore.js')));
+
+  // --- the systemic version of the bug above.
+  //
+  // app.js reaches for elements by id at load. One that does not exist returns
+  // null, the listener call throws, start() dies, and the user sees a blank
+  // screen with no error - the same failure mode as the lock overlay months
+  // ago. Checking every id is cheap; discovering this in the app is not.
+  const referenced = [...appSrc.matchAll(/\$\('([a-z0-9-]+)'\)/gi)].map((m) => m[1]);
+  // Some ids are rendered by app.js itself and then queried back, which is
+  // fine; only ids that exist in neither place are the bug.
+  const createdByClient = new Set(
+    [...appSrc.matchAll(/id="([a-z0-9-]+)"/gi)].map((m) => m[1]),
+  );
+  const missing = [...new Set(referenced)]
+    .filter((id) => !htmlSrc.includes(`id="${id}"`) && !createdByClient.has(id));
+  check('every element app.js reaches for exists in the markup',
+    missing.length === 0, missing.join(', '));
+}
+
 // --- run --------------------------------------------------------------------
 
 await testPushRoundTrip();
@@ -1947,6 +2125,7 @@ await testFolderNames();
 await testDemoLock();
 await testBackupEncryption();
 await testInterchange();
+await testVision();
 
 console.log(failures === 0 ? '\nAll checks passed.\n' : `\n${failures} check(s) failed.\n`);
 process.exit(failures === 0 ? 0 : 1);

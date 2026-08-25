@@ -734,3 +734,35 @@ input:focus, textarea:focus, select:focus {
   .demo-banner button { border-color: #d97706; color: #fde68a; }
   .demo-banner button:hover { background: #572508; }
 }
+
+/* camera capture ------------------------------------------------------------ */
+
+.camera-row { display: block; margin-top: 8px; cursor: pointer; }
+
+.camera-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: .95rem;
+}
+
+.camera-row:hover .camera-btn { border-color: var(--accent); color: var(--text); }
+
+.camera-result {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.camera-result .field { margin-top: 8px; }
+
+/* A reading the model was unsure of, or one it refused. */
+.camera-result.is-warn { border-color: #b45309; }

@@ -102,6 +102,48 @@
       <button type="submit" class="btn primary">Add</button>
     </form>
     <p id="quick-preview" class="quick-preview" hidden></p>
+
+    <!-- Camera capture. `capture` opens the camera straight away on a phone
+         rather than the photo library. Hidden unless a key is configured. -->
+    <label id="camera-row" class="camera-row" hidden>
+      <input id="camera-input" type="file" accept="image/*" capture="environment" hidden>
+      <span class="camera-btn">
+        <span aria-hidden="true">&#128247;</span> Photograph a flyer
+      </span>
+    </label>
+
+    <div id="camera-result" class="camera-result" hidden>
+      <p id="camera-status" class="muted small"></p>
+      <div id="camera-fields" hidden>
+        <label class="field">
+          <span>Title</span>
+          <input id="cam-title" type="text" maxlength="200">
+        </label>
+        <div class="row">
+          <label class="field">
+            <span>Date</span>
+            <input id="cam-date" type="date">
+          </label>
+          <label class="field">
+            <span>Folder</span>
+            <select id="cam-category">
+              <option value="personal" id="cam-opt-personal">Personal</option>
+              <option value="work" id="cam-opt-work" selected>Work</option>
+              <option value="fitness" id="cam-opt-fitness">Fitness</option>
+            </select>
+          </label>
+        </div>
+        <label class="field">
+          <span>Notes</span>
+          <input id="cam-notes" type="text" maxlength="2000">
+        </label>
+        <div class="row">
+          <button id="cam-save" class="btn primary full" type="button">Add this task</button>
+          <button id="cam-cancel" class="btn full" type="button">Discard</button>
+        </div>
+      </div>
+    </div>
+
     <button id="add-toggle" class="add-toggle">
       <span class="plus" aria-hidden="true">+</span> More options
     </button>

@@ -29,6 +29,7 @@ const META_RUNTIME_KEYS = new Set([
   'backup_guard_date', 'backup_last_at', 'backup_last_result', 'backup_fail_streak',
   'schedule_synced_at', 'schedule_last_result', 'schedule_feed_hash',
   'demo_reset_window', 'demo_reset_date', 'demo_seeded_at',
+  'vision_day', 'vision_used',
 ]);
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);

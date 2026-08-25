@@ -33,3 +33,8 @@ ENVIRONMENT = "production"
 DEFAULT_TIMEZONE = "America/Chicago"
 DEFAULT_NOTIFY_HOUR = "6"
 DEMO_MODE = "true"
+
+# If you enable camera capture on a public demo, read on the cheaper model and
+# cap it hard - every reading costs money on YOUR card, and anyone can upload.
+VISION_MODEL = "claude-haiku-4-5"
+VISION_DAILY_LIMIT = "25"

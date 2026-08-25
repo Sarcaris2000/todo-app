@@ -26,6 +26,7 @@ import {
 } from './backup-crypto.js';
 import { seedDemo } from './demo.js';
 import { tasksToCsv, tasksToMarkdown, importTasks } from './interchange.js';
+import { readImage } from './vision.js';
 import {
   checkLockout, recordFailure, clearFailures, clientIp,
   createSession, resolveSession, listSessions, deleteSession,
@@ -806,6 +807,7 @@ async function handleApi(request, env, url) {
       eveningHour: (await settings(env)).eveningHour,
       today,
       demo: env.DEMO_MODE === 'true',
+      camera: Boolean(env.ANTHROPIC_API_KEY),
       folderLabels: await folderLabels(env),
     });
   }
@@ -1250,6 +1252,64 @@ async function handleApi(request, env, url) {
     if (env.DEMO_MODE !== 'true') return json({ error: 'Not found' }, 404);
     const result = await seedDemo(env, today);
     return json({ ok: true, ...result });
+  }
+
+  // --- camera capture --------------------------------------------------------
+  //
+  // Reads one photo and returns what it saw. Deliberately creates nothing: the
+  // client shows the reading, the user confirms or edits, and the task is then
+  // created through the ordinary /api/tasks path with the ordinary validation.
+  //
+  // The image is held only for the duration of this request. It is never
+  // written to the database, and so never reaches a backup either.
+  if (path === '/api/vision' && method === 'POST') {
+    if (!env.ANTHROPIC_API_KEY) {
+      return json({ error: 'Camera capture is not configured. Set the ANTHROPIC_API_KEY secret.' }, 400);
+    }
+
+    // A hard daily ceiling. Every reading costs real money on someone's card,
+    // and the demo is public - without this, one person with a script could
+    // run up a bill overnight. Counted per local day, reset by the date key.
+    const limit = Number(env.VISION_DAILY_LIMIT || (env.DEMO_MODE === 'true' ? 25 : 50));
+    const usedDay = await getSetting(env, 'vision_day', '');
+    const used = usedDay === today ? Number(await getSetting(env, 'vision_used', '0')) || 0 : 0;
+
+    if (used >= limit) {
+      return json({
+        error: `That is ${limit} photos read today, which is the daily limit. It resets at midnight.`,
+      }, 429);
+    }
+    await setSetting(env, 'vision_day', today);
+    await setSetting(env, 'vision_used', used + 1);
+
+    const body = await request.json().catch(() => ({}));
+    const result = await readImage(env, {
+      base64: String(body?.image ?? ''),
+      mediaType: String(body?.mediaType ?? 'image/jpeg'),
+      todayISO: today,
+      timezone,
+    });
+
+    if (!result.ok) return json({ error: result.error }, 502);
+
+    // The reader flags anything that looks like an identifiable person. Refuse
+    // rather than offer to file it: the point of the check is that this app is
+    // used by a clinician, and a photo taken on a ward can catch a name in the
+    // frame without the photographer noticing.
+    if (result.data.containsPersonalData) {
+      return json({
+        ok: false,
+        blocked: true,
+        error: 'That photo appears to contain someone\'s personal details, so nothing was '
+          + 'created and the image has been discarded. Photograph the flyer alone.',
+      }, 200);
+    }
+
+    if (!result.data.found || !result.data.title) {
+      return json({ ok: false, error: 'No event or deadline could be read from that photo.' }, 200);
+    }
+
+    return json({ ok: true, reading: result.data });
   }
 
   // --- import / export -------------------------------------------------------

@@ -23,6 +23,9 @@ copy to your own Cloudflare account, and your data lives in your database.
 - **Recurring tasks, snooze, subtasks, search**, natural-language quick add, a
   weekly workout plan with streaks, and tasks that stay hidden until the day
   they are actually actionable.
+- **Photograph a flyer.** Point the camera at a conference poster or a printed
+  schedule; Claude reads the date out of it and proposes a task. Nothing is
+  created until you confirm what it read.
 - **Import and export that other software understands** - CSV, Markdown
   checklists, JSON, and iCalendar. Coming from another app, or leaving for one,
   should not mean retyping anything.
@@ -122,17 +125,52 @@ apps' UI.
 An earlier version guessed, and turned a Markdown heading into a task called
 `## Work`; silently inventing tasks is a worse failure than saying no.
 
+## Camera capture (optional)
+
+Settings aside, this one needs an [Anthropic API key](https://console.anthropic.com/settings/keys):
+
+```bash
+npx wrangler secret put ANTHROPIC_API_KEY
+```
+
+The button stays hidden until that secret exists, so the feature is inert on an
+install that has not configured it.
+
+A photo is shrunk to 1568px in the browser, read once, and **discarded** - it is
+never written to the database and so never reaches a backup. The reading is
+shown to you with editable fields; a task is only created when you confirm it,
+through the ordinary create endpoint with the ordinary validation.
+
+**It costs real money.** Roughly 2-4c per photo on `claude-opus-5`, or about
+0.5c on `claude-haiku-4-5` (`npx wrangler secret put VISION_MODEL`). A hard
+daily ceiling is enforced server-side before the API is ever called -
+`VISION_DAILY_LIMIT`, default 50, and 25 in demo mode. **If you put this on a
+public demo, the ceiling is the only thing between a stranger with a script and
+your card.**
+
+### A word to clinical users
+
+The extraction schema includes a `contains_personal_data` flag, instructed to
+err towards true. If the reader believes the image shows any identifiable
+person's details, the request is refused outright - no task, image discarded -
+rather than offered for filing.
+
+That is a safety net, not a permission slip. **Do not point this at anything on
+a ward.** A census whiteboard behind a flyer, a chart number in the corner of a
+printout, initials on a schedule - a camera makes accidental capture far easier
+than typing does, and the image leaves your Worker to be read.
+
 ## Tests
 
 ```bash
 npm test
 ```
 
-Around 530 checks covering the push encryption against an independent
+Around 580 checks covering the push encryption against an independent
 decryption, ranking, recurrence, the iCalendar parser, free-window maths, auth
 and lockout, the restore path against a real SQLite database, backup encryption
 including tamper detection, every import format including the ones that used to
-produce silent garbage, and a set of frontend structure assertions that
+produce silent garbage, the camera reader against a stubbed API, and a set of frontend structure assertions that
 exist because each one caught a real bug once.
 
 No network access, no fixtures to maintain. Run it before every deploy.
