@@ -259,8 +259,12 @@ input:focus, textarea:focus, select:focus {
 
 .swipe-hint { margin: -4px 0 10px; }
 @media (hover: hover) and (pointer: fine) {
-  /* On a mouse the buttons appear on hover, so the swipe wording would mislead. */
-  .swipe-hint::after { content: ' On a trackpad, two-finger swipe, or just hover.'; }
+  /* On a mouse every action appears on hover, so the swipe wording misleads. */
+  .swipe-hint { font-size: 0; }
+  .swipe-hint::after {
+    font-size: .82rem;
+    content: 'Hover a task for Edit and Complete, or its left edge to snooze. On a trackpad you can also two-finger swipe.';
+  }
 }
 
 /* The left-hand strip: swipe right to defer. */
@@ -269,6 +273,7 @@ input:focus, textarea:focus, select:focus {
   inset: 0 auto 0 0;
   width: var(--later-width);
   display: flex;
+  flex-direction: column;
   z-index: 2;
   transform: translateX(-100%);
   transition: transform .22s cubic-bezier(.22,.61,.36,1);
@@ -277,10 +282,30 @@ input:focus, textarea:focus, select:focus {
   overflow: hidden;
 }
 .task-row.is-dragging .task-later { transition: none; }
-.task-later button {
-  flex: 1; border: none; font: inherit; font-size: .88rem; font-weight: 500;
-  cursor: pointer; background: #8a6d3b; color: #fff;
+/* A plain label, not a button: naming the action is its only job, and a third
+   clickable thing in this strip would just be something to hit by accident. */
+.later-title {
+  flex: 0 0 auto;
+  padding: 4px 0 3px;
+  background: #6f5029;
+  color: #fff;
+  font-size: .64rem;
+  font-weight: 600;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  text-align: center;
 }
+
+.later-options { flex: 1; display: flex; min-height: 0; }
+
+.task-later button {
+  flex: 1; border: none; font: inherit; font-size: .74rem; font-weight: 500;
+  cursor: pointer; background: #8a6d3b; color: #fff;
+  padding: 0 3px; line-height: 1.1;
+}
+
+/* Hairlines between the options, so they read as separate choices. */
+.task-later button + button { box-shadow: inset 1px 0 0 rgba(255, 255, 255, .22); }
 .task-later button:hover { filter: brightness(1.08); }
 
 .chip.snoozed { background: var(--surface-2); color: var(--muted); font-style: italic; }
@@ -292,7 +317,7 @@ input:focus, textarea:focus, select:focus {
   overflow: hidden;
   border-radius: var(--radius);
   --actions-width: 168px;
-  --later-width: 100px;
+  --later-width: 210px;
 }
 
 /* The buttons ride in over the row rather than pushing it aside, so the task
@@ -311,9 +336,29 @@ input:focus, textarea:focus, select:focus {
 }
 .task-row.is-dragging .task-actions { transition: none; }
 
-/* Mice cannot swipe comfortably, so hovering brings the buttons in. */
+/* The left-edge hover target. Sits above the card so it catches the pointer,
+   but below the action strips (z-index 2) so that once "Later" slides in, the
+   button itself is on top and clickable. Clicks fall through to the row's own
+   handler by bubbling, so the left edge still opens the task. */
+.later-zone {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 56px;
+  z-index: 1;
+}
+
+/* Mice cannot swipe, so hover stands in for both gestures: the left edge for
+   Later, the rest of the row for Edit and Complete. */
 @media (hover: hover) and (pointer: fine) {
-  .task-row:not(.is-dragging):not(.is-open):hover .task-actions {
+  .task-row:not(.is-dragging):not(.is-open):hover:not(:has(.later-zone:hover)) .task-actions {
+    transform: translateX(0);
+  }
+
+  /* Hovering the strip itself keeps it open - otherwise the pointer leaves the
+     zone the moment the strip covers it, and the two flicker against each
+     other. */
+  .task-row:not(.is-dragging):not(.is-open) .later-zone:hover ~ .task-later,
+  .task-row:not(.is-dragging):not(.is-open) .task-later:hover {
     transform: translateX(0);
   }
 }

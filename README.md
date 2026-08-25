@@ -125,6 +125,18 @@ apps' UI.
 An earlier version guessed, and turned a Markdown heading into a task called
 `## Work`; silently inventing tasks is a worse failure than saying no.
 
+## Deploying a change
+
+```bash
+npm run deploy
+```
+
+Not `wrangler deploy` directly. The npm script bumps the service worker cache
+name first, and without that browsers keep serving the previously cached shell -
+your change goes live on the server and nobody sees it. This is written down
+because it happened: a hand-written `sed` bump silently matched nothing and a
+dozen deploys shipped assets that no browser ever loaded.
+
 ## Camera capture (optional)
 
 Settings aside, this one needs an [Anthropic API key](https://console.anthropic.com/settings/keys):

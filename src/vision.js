@@ -15,6 +15,14 @@ const API_VERSION = '2023-06-01';
 /** Opus reads poor photographs markedly better, which is the entire job. */
 export const DEFAULT_MODEL = 'claude-opus-5';
 
+/**
+ * `effort` is not universal. The 4.5-era models - Haiku 4.5 and Sonnet 4.5 -
+ * reject it outright ("This model does not support the effort parameter"), and
+ * the demo runs on Haiku to keep costs down. Send it only where it is
+ * understood, rather than assuming every model takes the same options.
+ */
+const SUPPORTS_EFFORT = /^claude-(fable|mythos|opus|sonnet)-(5|4-6|4-7|4-8)\b/;
+
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const ALLOWED_MEDIA = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
 
@@ -103,12 +111,15 @@ export async function readImage(env, { base64, mediaType, todayISO, timezone }) 
     return { ok: false, error: 'That photo is too large. Try again with a smaller one.' };
   }
 
+  const model = env.VISION_MODEL || DEFAULT_MODEL;
+
   const body = {
-    model: env.VISION_MODEL || DEFAULT_MODEL,
+    model,
     max_tokens: 8192,
-    // Thinking stays on: disabling it on Opus 5 can put a tool call into the
-    // visible text instead of a tool_use block. Low effort keeps it quick.
-    output_config: { effort: 'low' },
+    // Thinking stays on where it exists: disabling it on Opus 5 can put a tool
+    // call into the visible text instead of a tool_use block. Low effort keeps
+    // it quick - on the models that accept the parameter at all.
+    ...(SUPPORTS_EFFORT.test(model) ? { output_config: { effort: 'low' } } : {}),
     tools: [EXTRACT_TOOL],
     tool_choice: { type: 'tool', name: EXTRACT_TOOL.name },
     messages: [{

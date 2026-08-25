@@ -197,8 +197,24 @@ function taskRowHtml(task, rank) {
 
     return `
       <div class="task-row" data-id="${task.id}">
+        <!-- An invisible strip down the left edge. Hovering it brings in the
+             Later button; hovering anywhere else brings in Edit and Complete.
+             A mouse cannot swipe, so without this the left-hand action was
+             simply unreachable on a laptop. -->
+        <span class="later-zone" aria-hidden="true"></span>
         <div class="task-later">
-          <button data-later="${task.id}">${task.snoozed ? 'Unhide' : 'Later'}</button>
+          <!-- Two rows: a plain label saying what this strip is, then the
+               durations. The label is a span, not a button - naming the action
+               is its whole job, and a third clickable thing here would just be
+               something else to hit by accident. -->
+          <span class="later-title">${task.snoozed ? 'Snoozed' : 'Snooze'}</span>
+          <div class="later-options">
+            ${task.snoozed
+    ? `<button data-later="${task.id}">Unhide</button>`
+    : `<button data-snooze="${task.id}" data-preset="tomorrow">Tomorrow</button>
+               <button data-snooze="${task.id}" data-preset="weekend">Weekend</button>
+               <button data-snooze="${task.id}" data-preset="nextweek">Next week</button>`}
+          </div>
         </div>
         <div class="task-actions" aria-hidden="false">
           <button class="swipe-action edit" data-edit="${task.id}">Edit</button>
@@ -651,7 +667,8 @@ async function loadPlanEditor() {
 // Width of the revealed Edit + Complete buttons. Must match --actions-width.
 const ACTIONS_WIDTH = 168;
 // Width of the left-hand Later strip. Must match --later-width.
-const LATER_WIDTH = 100;
+// Must match --later-width in styles.css; there is a test that they agree.
+const LATER_WIDTH = 210;
 // Past this much drag, releasing snaps the row open rather than closed.
 const OPEN_THRESHOLD = 55;
 
@@ -1510,6 +1527,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.body.addEventListener('click', (event) => {
     const toggle = event.target.closest('[data-toggle]');
     if (toggle) { closeSwipedRow(); toggleTask(toggle.dataset.toggle); return; }
+
+    const snooze = event.target.closest('[data-snooze]');
+    if (snooze) {
+      closeSwipedRow();
+      snoozeTask(snooze.dataset.snooze, snooze.dataset.preset);
+      return;
+    }
 
     const later = event.target.closest('[data-later]');
     if (later) {

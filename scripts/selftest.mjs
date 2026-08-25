@@ -1981,6 +1981,19 @@ async function testVision() {
     // cheap.
     check('thinking is left on, with effort lowered instead',
       !('thinking' in sent.opts) && sent.opts.output_config.effort === 'low');
+
+    // Haiku 4.5 and Sonnet 4.5 reject `effort` outright, and the demo runs on
+    // Haiku - so sending it unconditionally broke the demo's camera entirely
+    // while the owner's own app (on Opus) worked fine.
+    stub(async (url, opts) => { sent = { opts: JSON.parse(opts.body) }; return toolReply(FULL); });
+    await readImage({ ...env, VISION_MODEL: 'claude-haiku-4-5' }, args);
+    check('effort is omitted for a model that rejects it',
+      !('output_config' in sent.opts), JSON.stringify(sent.opts.output_config));
+    check('the model itself is still honoured', sent.opts.model === 'claude-haiku-4-5');
+
+    await readImage({ ...env, VISION_MODEL: 'claude-sonnet-4-6' }, args);
+    check('effort is still sent to a model that accepts it',
+      sent.opts.output_config?.effort === 'low');
     check('the image is sent as base64 with its media type',
       sent.opts.messages[0].content[0].source.media_type === 'image/jpeg');
     check("today's date is given so relative dates resolve",
@@ -2087,6 +2100,69 @@ async function testVision() {
     /VISION_DAILY_LIMIT = "25"/.test(demoConfig));
   check('the usage counter is not restored from a backup',
     /'vision_day', 'vision_used'/.test(read('src/restore.js')));
+
+  // --- every row action must be reachable with a mouse.
+  //
+  // Hover revealed only the right-hand strip, so "Later" was unreachable
+  // without a touchscreen: the action existed, was styled, was wired to a
+  // working handler, and no amount of hovering brought it in.
+  const css = read('public/styles.css');
+  check('the row has a left-edge hover target', /class="later-zone"/.test(appSrc));
+  check('the zone is positioned down the left edge',
+    /\.later-zone \{[\s\S]{0,140}inset: 0 auto 0 0;[\s\S]{0,60}width: 56px/.test(css));
+  // Above the card so it catches the pointer, below the strips (z-index 2) so
+  // the Later button is clickable once it slides in over the zone.
+  check('the zone sits below the action strips',
+    /\.later-zone \{[\s\S]{0,180}z-index: 1;/.test(css));
+  check('hovering the zone opens the Later strip',
+    /\.later-zone:hover ~ \.task-later/.test(css));
+  check('hovering the strip keeps it open, so the two cannot flicker',
+    /\.task-later:hover \{[\s\S]{0,60}transform: translateX\(0\)/.test(css)
+    || /\.task-later:hover \{/.test(css) || /\.task-later:hover,?/.test(css));
+  check('the main actions stay out while the left edge is hovered',
+    /:hover:not\(:has\(\.later-zone:hover\)\) \.task-actions/.test(css));
+  check('all of this is gated to pointer devices',
+    css.indexOf('@media (hover: hover) and (pointer: fine)') < css.indexOf('.later-zone:hover ~ .task-later'));
+  check('the duplicate third button is gone', !/swipe-action later/.test(appSrc));
+  check('the touch swipe strip is untouched', /class="task-later"/.test(appSrc));
+
+  // "Later" named no duration and silently meant tomorrow, so nobody could
+  // tell what it would do. Each option now says so.
+  for (const [preset, label] of [['tomorrow', 'Tomorrow'], ['weekend', 'Weekend'],
+    ['nextweek', 'Next week']]) {
+    check(`snooze offers "${label}"`,
+      new RegExp(`data-preset="${preset}">${label}<`).test(appSrc));
+  }
+  check('the vague "Later" wording is gone', !/>Later</.test(appSrc));
+  check('a snoozed row still offers Unhide', /data-later="\$\{task\.id\}">Unhide</.test(appSrc));
+  check('every preset the UI offers is one the server understands',
+    ['tomorrow', 'weekend', 'nextweek'].every((p) =>
+      new RegExp(`preset === '${p}'`).test(read('src/recurrence.js'))));
+  check('the strip widened to hold three options', /--later-width: 210px/.test(css));
+
+  // Two rows: a label saying what the strip is, then the durations. Without
+  // the label the three buttons said "Tomorrow / Weekend / Next week" with no
+  // indication of what would happen to the task.
+  check('the strip is labelled "Snooze"', /class="later-title">\$\{task\.snoozed \? 'Snoozed' : 'Snooze'\}/.test(appSrc));
+  check('the label is not clickable', /<span class="later-title"/.test(appSrc)
+    && !/<button class="later-title"/.test(appSrc));
+  check('the strip stacks label over options', /\.task-later \{[\s\S]{0,220}flex-direction: column;/.test(css));
+  check('the options sit in their own row', /\.later-options \{ flex: 1; display: flex;/.test(css));
+  check('the options are visually separated',
+    /\.task-later button \+ button \{ box-shadow: inset/.test(css));
+  check('the hint no longer says "hide until later"', !/hide until later/.test(htmlSrc));
+  check('one handler still serves it',
+    (appSrc.match(/closest\('\[data-later\]'\)/g) || []).length === 1);
+
+  // A silent no-op sed left the service worker at v22 through a dozen deploys,
+  // so every one of them shipped assets that browsers kept serving from cache.
+  const sw = read('public/sw.js');
+  const bump = read('scripts/bump-cache.mjs');
+  check('the cache name is still parseable', /todo-shell-v(\d+)/.test(sw));
+  check('a script owns the bump rather than a hand-written sed',
+    /todo-shell-v\\d\+/.test(bump));
+  check('deploying bumps the cache first',
+    /bump-cache\.mjs && wrangler deploy/.test(read('package.json')));
 
   // --- the systemic version of the bug above.
   //

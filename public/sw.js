@@ -3,7 +3,7 @@
 // Bump this on any deploy that changes the API contract. A new cache name
 // forces the install/activate cycle, which triggers `controllerchange` in
 // app.js and reloads any page still running the previous build.
-const CACHE = 'todo-shell-v22';
+const CACHE = 'todo-shell-v26';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/parse.js', '/manifest.json'];
 
 self.addEventListener('install', (event) => {
