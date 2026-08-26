@@ -600,11 +600,61 @@ async function testRecurrence() {
   check('the weekly review has its own guard key', /last_review_date/.test(indexJs));
 
   // --- evening nudge ---
+  const { composeEveningNudge } = await import('../src/index.js');
   check('the evening nudge exists', /sendEveningNudge/.test(indexJs));
   check('it reports what is still open rather than checking one task',
     /Nothing outstanding/.test(indexJs));
-  check('nothing outstanding means nothing is sent',
-    /if \(!outstanding\.length\) return \{ sent: 0, skipped: true/.test(indexJs));
+  // The nudge used to list only what was still owed today. It now also says
+  // what tomorrow holds, which is the last moment you can act on it - so
+  // "nothing outstanding" alone is no longer a reason to stay silent.
+  // Sunday-only was right when the nudge just tallied what was still open. A
+  // look-ahead is only useful the night before, which is every night.
+  check('the evening nudge defaults to every night',
+    /getSetting\(env, 'evening_days', '0,1,2,3,4,5,6'\)/.test(indexJs));
+  // A hide-until-due task is invisible on every other day, so the one night it
+  // can appear it must not be pushed out by three stale overdue items.
+  const SUNDAY = '2026-08-30';
+  const pinned = composeEveningNudge({
+    outstanding: [
+      ...Array.from({ length: 5 }, (_, i) => ({ title: `Old ${i}`, deadline: `2026-08-2${i}`, hide_until_due: 0 })),
+      { title: "Send Claude this week's calendar", deadline: SUNDAY, hide_until_due: 1 },
+    ],
+    ahead: [], dueTomorrow: [], todayISO: SUNDAY,
+  });
+  check('a task hidden until today leads the nudge',
+    pinned.body.startsWith("• Send Claude this week's calendar"));
+  check('and the backlog still fills the rest', /\+3 more$/.test(pinned.body));
+  check('a hidden task due another day is not pinned',
+    !composeEveningNudge({
+      outstanding: [{ title: 'A', deadline: '2026-08-24', hide_until_due: 0 },
+        { title: 'Later', deadline: '2026-09-05', hide_until_due: 1 }],
+      ahead: [], dueTomorrow: [], todayISO: SUNDAY,
+    }).body.startsWith('• Later'));
+
+  check('a quiet night sends nothing',
+    composeEveningNudge({ outstanding: [], ahead: [], dueTomorrow: [], todayISO: '2026-08-25' }) === null);
+  const owedAndBusy = composeEveningNudge({
+    outstanding: [{ title: 'Sign PFTs', deadline: '2026-08-25' },
+      { title: 'Late one', deadline: '2026-08-20' }],
+    ahead: ['PULMONARY CLINIC PM (5h 30m)'],
+    dueTomorrow: [{}, {}],
+    todayISO: '2026-08-25',
+  });
+  check('an overdue count leads the title', owedAndBusy.title === 'Still open — 1 overdue');
+  check('what is owed comes first', owedAndBusy.body.startsWith('• Sign PFTs'));
+  check('tomorrow follows, after a blank line',
+    /\n\nTomorrow: PULMONARY CLINIC PM \(5h 30m\) · 2 due$/.test(owedAndBusy.body));
+  const onlyTomorrow = composeEveningNudge({
+    outstanding: [], ahead: ['ICU SERVICE (11h)'], dueTomorrow: [{}], todayISO: '2026-08-25',
+  });
+  check('a clear evening before a busy day still gets a nudge', onlyTomorrow !== null);
+  check('and does not say "Tomorrow" twice',
+    onlyTomorrow.title === 'Tomorrow' && !onlyTomorrow.body.includes('Tomorrow'));
+  check('only the first three owed items are listed',
+    composeEveningNudge({
+      outstanding: Array.from({ length: 6 }, (_, i) => ({ title: `T${i}`, deadline: '2026-08-25' })),
+      ahead: [], dueTomorrow: [], todayISO: '2026-08-25',
+    }).body.endsWith('+3 more'));
   check('the workout is excluded from the nudge',
     /!\/\^workout-\/\.test\(t\.id\)/.test(indexJs));
   check('snoozed tasks do not trigger a nudge',
@@ -744,8 +794,10 @@ async function testQuickAdd() {
     /<script type="module" src="\/parse\.js">/.test(html));
   check('the Worker and the browser share one parser',
     /from '\.\.\/public\/parse\.js'/.test(readFileSync(join(ROOT, 'src/index.js'), 'utf8')));
+  // The dictated line is `spoken`, not `text`: `text` is now the plain-text
+  // response helper, and one of them had to give way.
   check('dictated text goes through the same parser',
-    /parseQuickAdd\(text, today\)/.test(readFileSync(join(ROOT, 'src/index.js'), 'utf8')));
+    /parseQuickAdd\(spoken, today\)/.test(readFileSync(join(ROOT, 'src/index.js'), 'utf8')));
 }
 
 // --- 8. weekly events ---------------------------------------------------------
@@ -1796,7 +1848,7 @@ async function testInterchange() {
   check('export serves csv and markdown', /format === 'markdown'/.test(indexSrc)
     && /text\/csv; charset=utf-8/.test(indexSrc));
   check('importing tasks INSERTs rather than deleting',
-    /INSERT INTO tasks \(id, title, notes, category, deadline, priority, estimate_minutes,\s*\n\s*status, recur, subtasks, hide_until_due/.test(indexSrc));
+    /INSERT INTO tasks \(id, title, notes, category, deadline, start_time, priority, estimate_minutes,\s*\n\s*status, recur, subtasks, hide_until_due/.test(indexSrc));
   const importBlock = indexSrc.slice(indexSrc.indexOf("path === '/api/import/tasks'"),
     indexSrc.indexOf("// --- restore"));
   check('the task import never issues a DELETE', !/DELETE/.test(importBlock));
@@ -2073,6 +2125,30 @@ async function testVision() {
     /api\('\/tasks', \{\s*\n\s*method: 'POST'/.test(appSrc));
   check('a low-confidence reading is called out', /hard to read/.test(appSrc));
 
+  // --- the reader classifies; the client used to throw that answer away and
+  // --- file everything as a task, so a Grand Rounds poster became a to-do.
+  check('the schema asks which kind it is',
+    /An "event" happens at a time; a "task" is something to do by a date/.test(visionSrc));
+  check('the classification survives normalisation',
+    /kind: \['event', 'task', 'none'\]\.includes\(input\.kind\)/.test(visionSrc));
+  check('the client honours it', /\$\('cam-is-event'\)\.checked = r\.kind === 'event'/.test(appSrc));
+  check('an event photo posts to the events endpoint',
+    /if \(asEvent\) \{[\s\S]{0,120}api\('\/events'/.test(appSrc));
+  check('a task photo still posts to tasks',
+    /\} else \{[\s\S]{0,160}api\('\/tasks'/.test(appSrc));
+  check('the times the reader found are carried over',
+    /\$\('cam-start'\)\.value = r\.time \|\| ''/.test(appSrc));
+  check('the guess is correctable before saving', /id="cam-is-event"/.test(htmlSrc));
+  // A task can be pinned to an hour now, so the start time is offered for
+  // both kinds. Only the end time is event-only - a task with an end time
+  // would just be an event.
+  check('the end time is event-only, the folder is task-only',
+    /\$\('cam-end'\)\.closest\('\.field'\)\.hidden = !isEvent;[\s\S]{0,140}\$\('cam-category'\)\.closest\('\.field'\)\.hidden = isEvent/.test(appSrc));
+  check('a photographed task keeps the time it was read from',
+    /deadline: \$\('cam-date'\)\.value \|\| null,\s*\n\s*start_time: \$\('cam-start'\)\.value \|\| null/.test(appSrc));
+  check('the toast says which was created',
+    /asEvent \? 'Event added from photo' : 'Added from photo'/.test(appSrc));
+
   // Zero runtime dependencies is a property of this project, not an accident.
   check('no SDK dependency was introduced',
     !/@anthropic-ai\/sdk/.test(read('package.json')));
@@ -2182,6 +2258,680 @@ async function testVision() {
     missing.length === 0, missing.join(', '));
 }
 
+// --- 19. events by typing -----------------------------------------------------
+
+async function testTypedEvents() {
+  console.log('\nEvents by typing');
+
+  const { parseQuickAdd } = await import('../public/parse.js');
+  const { cleanEvent, cleanEventDate } = await import('../src/events.js');
+  const read = (rel) => readFileSync(join(ROOT, rel), 'utf8');
+  const appSrc = read('public/app.js');
+  const eventsSrc = read('src/events.js');
+  const indexSrc = read('src/index.js');
+
+  const T = '2026-08-25';
+  const p = (s) => parseQuickAdd(s, T);
+
+  // --- a time RANGE is what marks something as occupying the day. A single
+  // --- time must stay a task, or every "call the lab 3pm" habit breaks.
+  const oneOff = p('Dinner with the Harrisons sept 12 7-9pm');
+  check('a dated time range is a one-off event', oneOff.kind === 'event');
+  check('its date is read', oneOff.date === '2026-09-12');
+  check('its times are read', oneOff.time === '19:00' && oneOff.endTime === '21:00');
+  check('it does not repeat', oneOff.repeatsWeekly === false);
+
+  const weekly = p('Grand Rounds every thursday 8-9am');
+  check('"every <weekday>" plus a range is a weekly event', weekly.kind === 'event');
+  check('the weekday is resolved', weekly.repeatsWeekly === true && weekly.dayOfWeek === 4);
+  check('24h conversion is right', weekly.time === '08:00' && weekly.endTime === '09:00');
+
+  check('a 24-hour range works too',
+    p('Journal club every tuesday 12:00-13:00').time === '12:00');
+
+  // The behaviour that must NOT change.
+  const timedTask = p('Call the lab friday 3pm');
+  check('a single time is still a task', timedTask.kind !== 'event');
+  check('but the time is no longer thrown away', timedTask.time === '15:00');
+  const recurTask = p('Sign reports every thursday');
+  check('recurring with no time stays a task', recurTask.kind !== 'event');
+  check('and keeps its weekly recurrence', recurTask.recur === 'weekly');
+  check('a plain line is still a task', p('Buy milk').kind !== 'event');
+  check('a date with no time is still a task', p('Renew licence sept 15').kind !== 'event');
+
+  // --- storage. A dated row is a one-off; a dateless one recurs.
+  check('a valid date is accepted', cleanEventDate('2026-09-12') === '2026-09-12');
+  check('nonsense is rejected', cleanEventDate('next tuesday') === null);
+  check('an empty date means weekly', cleanEventDate('') === null);
+
+  const dated = cleanEvent({ title: 'Dinner', date: '2026-09-12', start_time: '19:00' });
+  check('a dated event keeps its date', dated.date === '2026-09-12');
+  // 12 Sept 2026 is a Saturday; day_of_week is derived so the two cannot disagree.
+  check('its weekday is derived, not supplied', dated.day_of_week === 6);
+  const supplied = cleanEvent({ title: 'X', date: '2026-09-12', day_of_week: 1 });
+  check('a supplied weekday cannot contradict the date', supplied.day_of_week === 6);
+  check('a weekly event still has no date',
+    cleanEvent({ title: 'Rounds', day_of_week: 4 }).date === null);
+
+  // --- the day lookup must return both kinds, and a one-off must not recur.
+  check('the day query matches weekly rows by weekday',
+    /date IS NULL AND day_of_week = \?/.test(eventsSrc));
+  check('and one-off rows by exact date',
+    /date IS NOT NULL AND date = \?/.test(eventsSrc));
+  check('the date reaches the query', /eventsForDay\(env, dayOfWeek, dateISO/.test(eventsSrc));
+  // The invariant is that no caller omits the date - counting them meant the
+  // check went stale the moment a third one was added, which is the opposite
+  // of what a regression test is for.
+  const eventCalls = indexSrc.match(/safeEventsForToday\([^)]*\)/g) || [];
+  check(`every safeEventsForToday call passes a date (${eventCalls.length} call sites)`,
+    eventCalls.length >= 2
+    && eventCalls.every((c) => /safeEventsForToday\(env, timezone, (todayISO|today)\)/.test(c)
+      || /todayISO = null/.test(c)));
+  check('the insert stores the date', /INSERT INTO events \(id, date, day_of_week/.test(eventsSrc));
+
+  // --- the client routes by kind, and the guess is correctable.
+  check('an event posts to the events endpoint', /api\('\/events', \{/.test(appSrc));
+  check('a weekly event sends a weekday, a one-off a date',
+    /p\.repeatsWeekly\s*\n?\s*\? \{ day_of_week: p\.dayOfWeek \}\s*\n?\s*: \{ date:/.test(appSrc));
+  check('the preview says which it will create', /\$\{isEvent \? 'Event' : 'Task'\}/.test(appSrc));
+  check('and offers to flip it', /id="quick-flip"/.test(appSrc));
+  check('the override wins over the guess',
+    /quickKindOverride \|\| \(p\.kind === 'event'/.test(appSrc));
+  check('typing again re-makes the guess',
+    /quickKindOverride = null;\s*\n\s*renderQuickPreview\(\);/.test(appSrc));
+  check('the flip listener is delegated, since the preview is rebuilt',
+    /\$\('quick-preview'\)\.addEventListener\('click'/.test(appSrc));
+
+  // --- an event added for Thursday must be visible before Thursday. Upcoming
+  // --- showed only the rostered schedule, so a typed appointment vanished
+  // --- until the morning brief on the day itself.
+  check('the server sends one-off events ahead of today',
+    /upcomingEvents: \(await upcomingEvents\(env, today, 21\)/.test(indexSrc));
+  check('the query returns only dated rows',
+    /date IS NOT NULL AND date > \? AND date <= \?/.test(eventsSrc));
+  check('weekly commitments are not repeated into every future day',
+    /Weekly commitments are deliberately excluded/.test(eventsSrc));
+  check('the client keeps them', /let upcomingEvents = \[\]/.test(appSrc));
+  check('and renders them in Upcoming', /clinical-row is-event/.test(appSrc));
+  // Within a day the order runs from what cannot move to what can.
+  check('ordering puts rostered work first, then appointments, then tasks',
+    /KIND_ORDER = \{ clinical: 0, event: 1, task: 2 \}/.test(appSrc));
+
+  // --- "next clear day" read only the roster, so it once announced a day as
+  // --- clear while the same screen listed an appointment on it.
+  const schedSrc = read('src/schedule.js');
+  check('free-day detection loads events', /SELECT date, day_of_week, start_time, end_time, tentative FROM events/.test(schedSrc));
+  check('a day is only clear when nothing occupies it',
+    /clinicalMinutesForDay\(byDate\.get\(iso\) \?\? \[\], mappings\) === 0\s*\n\s*&& eventMinutesOn\(iso, weekday\) === 0/.test(schedSrc));
+  check('both weekly and one-off events are counted',
+    /weekly\.get\(weekday\) \?\? \[\]/.test(schedSrc) && /oneOff\.get\(iso\) \?\? \[\]/.test(schedSrc));
+  check('the weekend check passes the right weekdays',
+    /isClear\(iso, 6\) && isClear\(sunday, 0\)/.test(schedSrc));
+  // A tentative commitment reports zero minutes, so it must not block a day.
+  check('tentative commitments still leave a day clear',
+    /tentative commitment reports zero minutes/.test(schedSrc));
+
+  // --- every row in Coming up must read as the same family. The restyle put
+  // --- the panel on --surface-2, which left task rows on --surface standing
+  // --- out as white cards among grey ones.
+  const upcomingCss = read('public/styles.css');
+  check('a task row shares the recessed background',
+    /\.upcoming-task \{[\s\S]{0,220}background: var\(--surface-2\)/.test(upcomingCss));
+  check('and the same padding as a rostered row',
+    /\.upcoming-task \{[\s\S]{0,220}padding: 9px 13px/.test(upcomingCss));
+  check('every row carries a dot, so titles line up',
+    (appSrc.match(/class="clinical-dot"/g) || []).length === 3);
+  // Solid = fixed commitment, hollow = a task, legible before the chip is read.
+  check('a task dot is hollow',
+    /\.upcoming-task \.clinical-dot \{[\s\S]{0,120}background: transparent/.test(upcomingCss));
+  check('an appointment dot is the event hue',
+    /\.clinical-row\.is-event \.clinical-dot \{ background: var\(--hue-slate\)/.test(upcomingCss));
+}
+
+/**
+ * The second audit pass: six things that were individually small and all had
+ * the same shape - the app knew something and then failed to say it, or said
+ * something it did not mean.
+ */
+async function testSecondPass() {
+  console.log('\nSecond pass');
+
+  const { cleanEvent } = await import('../src/events.js');
+  const { buildDigest, timeLabel } = await import('../src/rank.js');
+  const read = (rel) => readFileSync(join(ROOT, rel), 'utf8');
+  const appSrc = read('public/app.js');
+  const htmlSrc = read('public/index.html');
+  const cssSrc = read('public/styles.css');
+  const eventsSrc = read('src/events.js');
+  const indexSrc = read('src/index.js');
+  const demoSrc = read('src/demo.js');
+
+  // --- 1. a one-off must never read as a weekly commitment -------------------
+  check('the calendar list separates the two kinds',
+    /Every week/.test(appSrc) && /Just once/.test(appSrc));
+  check('a one-off is stamped with its date, not its weekday',
+    /const when = e\.date \? shortDate\(e\.date\) : EV_DAYS\[e\.day_of_week\]/.test(appSrc));
+  check('shortDate says which one it is', /Thu 27 Aug/.test(appSrc) || /getUTCDate\(\)/.test(appSrc));
+  // Matching a spent appointment on weekday alone lit it up every week after.
+  check('today is matched by date for a one-off, weekday for a weekly',
+    /once\.map\(\(e\) => eventRow\(e, e\.date === today\.date\)\)/.test(appSrc)
+    && /weekly\.map\(\(e\) => eventRow\(e, e\.day_of_week === today\.day_of_week\)\)/.test(appSrc));
+  check('the server sends today’s date, not only its weekday',
+    /today: \{ day_of_week: localDayOfWeek\(timezone\), date: today \}/.test(indexSrc));
+  check('the one-off stamp gets room for a date', /\.event-day\.is-once \{/.test(cssSrc));
+
+  // --- past one-offs are spent, and must not accumulate ----------------------
+  check('past one-offs are purged', /export async function purgePastEvents/.test(eventsSrc));
+  check('the purge only ever touches dated rows',
+    /DELETE FROM events WHERE date IS NOT NULL AND date < \?/.test(eventsSrc));
+  check('a weekly commitment is never purged by it',
+    !/DELETE FROM events WHERE date IS NULL/.test(eventsSrc));
+  check('housekeeping runs it daily', /const gone = await purgePastEvents\(env, date\)/.test(indexSrc));
+  check('the list hides them even before the purge runs',
+    /WHERE date IS NULL OR \? IS NULL OR date >= \?/.test(eventsSrc));
+  // Weekly rows in weekday order, one-offs in date order. Sorting a one-off by
+  // its derived weekday was what scattered it through the weekly pattern.
+  check('the two kinds are ordered by different things',
+    /ORDER BY \(date IS NOT NULL\),\s*\n\s*CASE WHEN date IS NULL THEN day_of_week END,\s*\n\s*date,/.test(eventsSrc));
+
+  // --- 2. Settings can create a one-off, not only a weekly commitment --------
+  check('the day list offers a one-off first',
+    /<option value="once">Just once/.test(appSrc));
+  check('and labels the rest as repeating', /Every \$\{d\}/.test(appSrc));
+  check('a date field exists for it', /id="ev-date"/.test(htmlSrc));
+  check('it is shown only for a one-off',
+    /const once = \$\('ev-day'\)\.value === 'once';\s*\n\s*\$\('ev-date'\)\.hidden = !once/.test(appSrc));
+  check('a one-off will not post without a date',
+    /if \(once && !\$\('ev-date'\)\.value\)/.test(appSrc));
+  // Sending both would create a way for the date and the weekday to disagree.
+  check('it sends a date or a weekday, never both',
+    /\.\.\.\(once \? \{ date: \$\('ev-date'\)\.value \} : \{ day_of_week: Number\(\$\('ev-day'\)\.value\) \}\)/.test(appSrc));
+
+  // --- 3. the date is an editable field like any other ----------------------
+  check('updateEvent sets the date',
+    /UPDATE events SET date = \?, day_of_week = \?/.test(eventsSrc));
+  check('and binds it', /\.bind\(e\.date, e\.day_of_week, e\.title/.test(eventsSrc));
+
+  // --- 4. a task keeps a time it was told ------------------------------------
+  check('timeLabel reads a time as a person would',
+    timeLabel('15:00') === '3pm' && timeLabel('09:30') === '9:30am'
+    && timeLabel('00:00') === '12am' && timeLabel('12:00') === '12pm');
+  check('and refuses nonsense rather than inventing',
+    timeLabel(null) === null && timeLabel('25:00') === null && timeLabel('bad') === null);
+  check('the schema has somewhere to put it',
+    /start_time\s+TEXT,\s+-- HH:MM, optional time of day/.test(read('schema.sql')));
+  check('there is a migration for existing databases',
+    /ALTER TABLE tasks ADD COLUMN start_time TEXT;/.test(read('migrations/013-task-time.sql')));
+  check('cleanTask validates it the same way an event does',
+    /start_time: cleanTime\(input\.start_time\)/.test(indexSrc));
+  // The preview showed the time back as confirmation and the request dropped
+  // it - claiming to have understood something and then discarding it.
+  check('quick add sends the time it showed you',
+    /start_time: p\.time \|\| null,\s*\n\s*priority: p\.priority/.test(appSrc));
+  check('the full form has a time field', /id="f-start"/.test(htmlSrc));
+  check('it round-trips through the form',
+    /\$\('f-start'\)\.value = task\?\.start_time \|\| ''/.test(appSrc)
+    && /start_time: \$\('f-start'\)\.value \|\| null/.test(appSrc));
+  check('it is editable over the API',
+    /'deadline', 'start_time', 'priority'/.test(indexSrc));
+  check('the task row shows it', /const at = timeLabel\(task\.start_time\)/.test(appSrc));
+  check('the chip is styled quietly beside the deadline', /\.chip\.at-time \{/.test(cssSrc));
+  // A weekly 3pm task that came back at no particular time would be a silent
+  // downgrade of something you set deliberately.
+  check('a repeating task keeps its time on the next occurrence',
+    /nextDeadline, task\.start_time \?\? null,/.test(indexSrc));
+  const digest = buildDigest([
+    { id: 'a', status: 'open', title: 'Call the lab', deadline: '2026-08-25',
+      start_time: '15:00', priority: 2, category: 'work', created_at: '2026-08-25' },
+  ], '2026-08-25');
+  check('the morning brief announces the time', /\(due today, 3pm\)/.test(digest.body));
+  const plain = buildDigest([
+    { id: 'b', status: 'open', title: 'Read the paper', deadline: null,
+      priority: 2, category: 'work', created_at: '2026-08-25' },
+  ], '2026-08-25');
+  check('and says nothing extra when there is no time', /^1\. Read the paper$/m.test(plain.body));
+  // An event still owns the end time; a task with one would just be an event.
+  check('a task has no end time', !/end_time: \$\('f-/.test(appSrc));
+
+  // --- a time that dies on export is the same bug one step later ------------
+  const { tasksToCsv, tasksToMarkdown, importTasks, CSV_COLUMNS } = await import('../src/interchange.js');
+  const timed = [{
+    title: 'Call the lab', notes: '', category: 'work', deadline: '2026-08-28',
+    start_time: '15:00', priority: 2, estimate_minutes: 10, status: 'open',
+    recur: null, subtasks: '[]', completed_at: null,
+  }];
+  check('csv exports the time', CSV_COLUMNS.includes('start_time')
+    && /,15:00,/.test(tasksToCsv(timed, { work: 'Work' })));
+  const roundTripped = importTasks(tasksToCsv(timed, { work: 'Work' })).tasks[0];
+  check('and reads it back unchanged', roundTripped.start_time === '15:00'
+    && roundTripped.deadline === '2026-08-28');
+  check('markdown shows it', /at 15:00/.test(tasksToMarkdown(timed, { work: 'Work' }, '2026-08-25')));
+  // Another app's export will not use our column name or our clock format.
+  const foreign = importTasks('Task,Due,Start\nDrop off the form,2026-09-01,3pm\n').tasks[0];
+  check('a foreign header and a 12-hour clock still land',
+    foreign.start_time === '15:00' && foreign.deadline === '2026-09-01');
+  // parseIcsDate always resolved this; there was nowhere to put it.
+  const fromIcs = importTasks(
+    ['BEGIN:VCALENDAR', 'BEGIN:VTODO', 'SUMMARY:Renew licence',
+      'DUE:20260901T150000', 'END:VTODO', 'END:VCALENDAR'].join('\r\n')).tasks[0];
+  check('a VTODO due time becomes the task time', fromIcs.start_time === '15:00');
+  check('an unreadable time is refused, not guessed',
+    importTasks('title,start\nX,half past three\n').tasks[0].start_time === null);
+  check('a task with no time is unaffected',
+    importTasks('title,due\nY,2026-09-01\n').tasks[0].start_time === null);
+
+  // --- 5. the demo shows what the app can actually do ------------------------
+  check('the demo seeds one-off dates', /const DEMO_ONE_OFFS = \[/.test(demoSrc));
+  check('they are relative to when it was seeded',
+    /const date = shift\(todayISO, e\.in_days\)/.test(demoSrc));
+  check('their weekday is derived, never supplied',
+    /const dow = new Date\(`\$\{date\}T00:00:00Z`\)\.getUTCDay\(\)/.test(demoSrc));
+  check('a demo task carries a time', /start_time: '15:00'/.test(demoSrc));
+  // seedDemo wipes before it inserts, so a duplicate id does not merely skip a
+  // row - the INSERT throws partway and the demo is left half-empty until the
+  // next reset six hours later. A reused 'demo-9' did exactly that.
+  const demoIds = [...demoSrc.matchAll(/id: '(demo-[a-z0-9-]+)'/g)].map((m) => m[1]);
+  const duplicated = demoIds.filter((id, i) => demoIds.indexOf(id) !== i);
+  check(`every demo id is unique${duplicated.length ? ` (reused: ${[...new Set(duplicated)].join(', ')})` : ''}`,
+    duplicated.length === 0 && demoIds.length > 15);
+
+  // --- the README documents a rule; the parser must actually follow it -------
+  // A README example that stopped being true is the same failure as a preview
+  // that shows a time and drops it: the app claiming something it does not do.
+  const { parseQuickAdd } = await import('../public/parse.js');
+  const TUE = '2026-08-25';
+  const kindOf = (line) => {
+    const r = parseQuickAdd(line, TUE);
+    return { kind: r.kind === 'event' ? 'event' : 'task', ...r };
+  };
+  const range = kindOf('Dinner sep 12 7pm-9:30pm');
+  check('a time range makes a one-off event',
+    range.kind === 'event' && range.repeatsWeekly === false
+    && range.date === '2026-09-12' && range.time === '19:00' && range.endTime === '21:30');
+  const everyWeek = kindOf('Clinic every tuesday 8am-12pm');
+  check('"every" plus a range makes a weekly commitment',
+    everyWeek.kind === 'event' && everyWeek.repeatsWeekly === true && everyWeek.dayOfWeek === 2);
+  const single = kindOf('Call the lab friday 3pm');
+  check('a single time stays a task and keeps the time',
+    single.kind === 'task' && single.deadline === '2026-08-28' && single.time === '15:00');
+  const repeating = kindOf('Grand rounds every thursday 8am');
+  check('a repeating task keeps both its rule and its time',
+    repeating.kind === 'task' && repeating.recur === 'weekly' && repeating.time === '08:00');
+  const readme = read('README.md');
+  check('the README documents the rule it actually implements',
+    /A time range makes an event; a\s*\n?single time makes a task/.test(readme));
+  for (const example of ['Dinner sep 12 7pm-9:30pm', 'Clinic every tuesday 8am-12pm',
+    'Call the lab friday 3pm', 'Grand rounds every thursday 8am']) {
+    check(`the README example "${example}" is in the README`, readme.includes(example));
+  }
+
+  // --- 6. no unreachable endpoints that still fire real pushes ---------------
+  check('the unwired test endpoints are gone',
+    !/'\/api\/test-evening'/.test(indexSrc) && !/'\/api\/test-review'/.test(indexSrc));
+  check('the digests they fired are still sent by cron',
+    /await sendEveningNudge\(env, date\)/.test(indexSrc)
+    && /await sendWeeklyReview\(env, date\)/.test(indexSrc));
+  check('the one endpoint with a button behind it stays',
+    /path === '\/api\/test-push'/.test(indexSrc));
+
+  // --- third pass: what the live app showed once it was actually looked at ---
+
+  // Four renderings of the same fact on one screen read as four kinds of fact.
+  check('one helper renders every time span', /function timeRange\(start, end\)/.test(appSrc));
+  const tr = new Function(
+    appSrc.match(/function timeLabel[\s\S]*?\n}/)[0]
+    + appSrc.match(/function timeRange[\s\S]*?\n}/)[0] + '; return timeRange;')();
+  check('a span reads as one 12-hour range',
+    tr('08:00', '12:00') === '8am-12pm' && tr('19:00', '21:30') === '7pm-9:30pm'
+    && tr('15:00', null) === '3pm' && tr(null, null) === null);
+  check('nothing still formats a raw 24-hour span by hand',
+    !/\$\{e\.start_time\}\$\{e\.end_time/.test(appSrc)
+    && !/\$\{c\.start_time\}[–-]\$\{c\.end_time\}/.test(appSrc));
+  // eventLabel writes the notification text and already spoke 12-hour; the
+  // screen now agrees with the lock screen.
+  check('the notification and the screen agree',
+    /`\$\{event\.title\} \$\{start\}\$\{end \? `-\$\{end\}` : ''\}/.test(eventsSrc));
+
+  // Copy that quietly stopped being true.
+  check('the open count no longer claims there are two folders',
+    /open across all folders/.test(appSrc) && !/open across both folders/.test(appSrc));
+  check('the calendar section is not called weekly any more',
+    /<h3>Calendar<\/h3>/.test(htmlSrc) && !/<h3>Weekly schedule<\/h3>/.test(htmlSrc));
+
+  // The date field defaulted to config.today during wiring, before sign-in,
+  // when config.today is still ''. And loadEvents returned early on an empty
+  // calendar - exactly when someone is adding their first event.
+  check('the date default uses the server’s day',
+    /const today = todayFromServer \|\| config\.today;/.test(appSrc));
+  check('and is applied before the empty-calendar return',
+    /todayFromServer = today\.date \|\| todayFromServer;\s*\n\s*syncEventKind\(\);[\s\S]{0,200}if \(!events\.length\)/.test(appSrc));
+
+  // Resetting the demo deletes the sessions table, including the caller's.
+  check('the demo reset hands back a usable session',
+    /const token = await createSession\(env, 'demo'\);\s*\n\s*return json\(\{ ok: true, token/.test(indexSrc));
+  check('and the client adopts it before reloading',
+    /if \(result\?\.token\) \{[\s\S]{0,120}localStorage\.setItem\(TOKEN_KEY, token\)/.test(appSrc));
+
+  // --- a repeating task is the one most likely to need its checklist again ---
+  check('the next occurrence is given a checklist column',
+    /subtasks, hide_until_due, created_at, updated_at\)\s*\n\s*VALUES \(\?, \?, \?, \?, \?, \?, \?, \?, 'open', \?, \?, \?, \?, \?\)/.test(indexSrc));
+  check('and it is filled from the completed one',
+    /nextSubtasks\(task\.subtasks\)/.test(indexSrc));
+  const nextSubtasks = new Function(
+    indexSrc.match(/function nextSubtasks\(raw\)[\s\S]*?\n}/)[0] + '; return nextSubtasks;')();
+  check('the steps carry over',
+    JSON.parse(nextSubtasks('[{"text":"A","done":true},{"text":"B","done":false}]')).length === 2);
+  check('but every box starts unticked',
+    JSON.parse(nextSubtasks('[{"text":"A","done":true}]')).every((x) => x.done === false));
+  check('malformed or empty checklists do not throw',
+    nextSubtasks(null) === '[]' && nextSubtasks('not json') === '[]'
+    && nextSubtasks('{"not":"an array"}') === '[]'
+    && nextSubtasks('[{"done":true}]') === '[]');
+
+  // Removing a commitment was a single unconfirmed click, with no undo.
+  check('removing a calendar entry asks first',
+    /if \(!confirm\(`Remove \$\{name \? `"\$\{name\}"` : 'this'\} from your calendar\?`\)\) return;/.test(appSrc));
+
+  // --- the invariant the whole one-off design rests on -----------------------
+  const dated = cleanEvent({ title: 'Dinner', date: '2026-09-12', start_time: '19:00' });
+  check('a dated event derives its own weekday', dated.day_of_week === 6 && dated.date === '2026-09-12');
+  const weekly = cleanEvent({ title: 'Clinic', day_of_week: 3, start_time: '08:00' });
+  check('a dateless event stays weekly', weekly.date === null && weekly.day_of_week === 3);
+  // A supplied weekday must never win over the date, or the two can disagree.
+  const conflicting = cleanEvent({ title: 'Dinner', date: '2026-09-12', day_of_week: 1 });
+  check('a date always beats a contradicting weekday', conflicting.day_of_week === 6);
+}
+
+/**
+ * The four things the app could not do that the good calendar and planning
+ * apps can: publish itself, look ahead at bedtime, take dictation, and put the
+ * list into the day.
+ */
+async function testNewFeatures() {
+  console.log('\nCalendar feed, look-ahead, voice, day plan');
+
+  const read = (rel) => readFileSync(join(ROOT, rel), 'utf8');
+  const appSrc = read('public/app.js');
+  const htmlSrc = read('public/index.html');
+  const indexSrc = read('src/index.js');
+
+  // --- 1. the calendar feed -------------------------------------------------
+  const ics = await import('../src/ics-out.js');
+  const TZ = 'America/Chicago';
+
+  check('a summer wall time becomes the right instant',
+    ics.utcStamp(ics.zonedToUtc('2026-08-27', '14:00', TZ)) === '20260827T190000Z');
+  // The same wall time in winter is an hour further from UTC. Getting this
+  // wrong is the classic recurring-event bug, and why nothing here uses RRULE.
+  check('and so does a winter one',
+    ics.utcStamp(ics.zonedToUtc('2026-12-15', '14:00', TZ)) === '20261215T200000Z');
+  check('midnight is not special-cased wrongly',
+    ics.utcStamp(ics.zonedToUtc('2026-08-27', '00:00', TZ)) === '20260827T050000Z');
+
+  // A display string reaching the converter used to yield a confident 00:00.
+  let threw = false;
+  try { ics.zonedToUtc('2026-08-27', '7am', TZ); } catch { threw = true; }
+  check('a non-clock time is refused rather than coerced to midnight', threw);
+  check('and a bad date too', (() => {
+    try { ics.zonedToUtc('not-a-date', '14:00', TZ); return false; } catch { return true; }
+  })());
+  check('toHHMM is a clock, not a label',
+    ics.toHHMM(420) === '07:00' && ics.toHHMM(1080) === '18:00' && ics.toHHMM(0) === '00:00');
+  check('nothing in the feed reaches for the display helper',
+    !/\btoClock\s*\(/.test(read('src/feed.js')));
+
+  // Written with String.raw and char codes: the expectation is a string full of
+  // backslashes, and spelling it as a normal literal is how you end up asserting
+  // something subtly different from what you meant.
+  const BS = String.fromCharCode(92);
+  const NL = String.fromCharCode(10);
+  // Built from characters rather than written as a literal: the expectation is
+  // a string of backslashes, and spelling it out is exactly how you end up
+  // asserting something subtly different from what you meant.
+  check('text is escaped in the RFC 5545 order, backslash first',
+    ics.escapeText(`a;b,c${BS}d${NL}e`)
+      === ['a', BS + ';', 'b', BS + ',', 'c', BS + BS + 'd', BS + 'n', 'e'].join(''));
+  const folded = ics.foldLine(`SUMMARY:${'café–naïve '.repeat(12)}`);
+  check('long lines fold to 75 octets',
+    folded.split('\r\n').every((l) => new TextEncoder().encode(l).length <= 75));
+  check('and never mid-character', !folded.includes('�'));
+
+  const stamp = ics.utcStamp(Date.parse('2026-08-25T00:00:00Z'));
+  const timed = ics.vevent({ uid: 'u', title: 'Dinner', dateISO: '2026-08-27',
+    start: '19:00', end: '21:30', timeZone: TZ, stamp }).join('\r\n');
+  check('a timed entry carries both ends',
+    /DTSTART:20260828T000000Z/.test(timed) && /DTEND:20260828T023000Z/.test(timed));
+  const allDay = ics.vevent({ uid: 'u', title: 'Back-up', dateISO: '2026-08-27',
+    start: null, timeZone: TZ, busy: false, stamp }).join('\r\n');
+  check('an untimed entry is all-day and transparent',
+    /DTSTART;VALUE=DATE:20260827/.test(allDay) && /TRANSP:TRANSPARENT/.test(allDay));
+  // A malformed row must degrade to an honest all-day entry, not a midnight lie.
+  const junk = ics.vevent({ uid: 'u', title: 'X', dateISO: '2026-08-27',
+    start: 'half past three', timeZone: TZ, stamp }).join('\r\n');
+  check('an unreadable time degrades to all-day', /DTSTART;VALUE=DATE:/.test(junk));
+
+  check('the feed lives outside /api, so no session is needed',
+    /url\.pathname\.startsWith\('\/feed\/'\)/.test(indexSrc));
+  check('an unconfigured feed cannot be opened with an empty token',
+    /if \(!stored \|\| !safeEqual\(presented, stored\)\)/.test(indexSrc));
+  check('the token is compared in constant time', /safeEqual\(presented, stored\)/.test(indexSrc));
+  check('the token is long enough to be un-guessable',
+    /crypto\.getRandomValues\(new Uint8Array\(32\)\)/.test(indexSrc));
+  check('crawlers are told to stay away', /'X-Robots-Tag': 'noindex, nofollow'/.test(indexSrc));
+  // A cached copy outlives the token, so revoking would not be immediate.
+  check('the feed is never cached', /'Cache-Control': 'no-store',/.test(indexSrc));
+  check('it is served as calendar text', /'text\/calendar; charset=utf-8'/.test(indexSrc));
+  check('regenerating replaces, which is the revoke',
+    /const feedToken = newFeedToken\(\);\s*\n\s*await setSetting\(env, 'feed_token', feedToken\)/.test(indexSrc));
+  check('the UI says the link is the password', /The link is the password/.test(htmlSrc));
+  check('and warns before regenerating', /will stop updating until you give it the new one/.test(appSrc));
+
+  // The token lives in meta for storage reasons, but it is a credential: a
+  // backup gets downloaded, emailed to yourself and left in Downloads, and
+  // anyone holding this string reads your calendar without signing in.
+  check('the feed token is excluded from exports',
+    /const EXPORT_EXCLUDED_META = new Set\(\['feed_token'\]\);/.test(indexSrc)
+    && /data\.meta = data\.meta\.filter\(\(row\) => !EXPORT_EXCLUDED_META\.has\(String\(row\?\.key\)\)\);/.test(indexSrc));
+  // Backups written before that fix still carry one, and restoring it would
+  // turn "revoked" into "revoked until the next restore".
+  check('and refused on the way back in',
+    /'feed_token',/.test(read('src/restore.js')));
+
+  // The client detected encrypted backups by magic - against the WRONG magic,
+  // TODOBK01, while the writer had long since moved to TODOBK02. Two bugs in
+  // one line: the check could never fire, and atob() threw outright on a plain
+  // JSON file, so restoring an unencrypted backup died with "Invalid
+  // character" before it ever reached the server.
+  const { MAGIC, encryptBackup, toBase64 } = await import('../src/backup-crypto.js');
+  const detect = (raw, name) => {
+    let sealed = name.endsWith('.enc');
+    try {
+      sealed = /^TODOBK\d{2}/.test(atob(raw.slice(0, 24).replace(/\s+/g, '')).slice(0, 8)) || sealed;
+    } catch { /* not base64, so not an encrypted backup */ }
+    return sealed;
+  };
+  const armoured = toBase64(await encryptBackup('pw', JSON.stringify({ a: 1 })));
+  const plainBackup = JSON.stringify({ exported_at: '2026-08-25T00:00:00Z', app: 'todo', data: {} });
+
+  // Tested against the regex literal, not the file text: the comment above it
+  // names the old magic while explaining the bug, and asserting on prose is
+  // how a check ends up measuring the wrong thing.
+  check('the client matches the magic by prefix, not by version',
+    /\/\^TODOBK\\d\{2\}\//.test(appSrc) && !/\/\^TODOBK01\//.test(appSrc));
+  check('the writer and the format comment agree',
+    MAGIC === 'TODOBK02' && /magic       8 bytes   "TODOBK02"/.test(read('src/backup-crypto.js')));
+  check('an encrypted backup is detected by its contents, not its name',
+    detect(armoured, 'renamed.json') === true);
+  check('and still by name when it has one', detect(armoured, 'b.json.enc') === true);
+  check('a plain JSON backup is not mistaken for an encrypted one',
+    detect(plainBackup, 'todo-backup.json') === false);
+  check('and reading one no longer throws', (() => {
+    try { detect(plainBackup, 'todo-backup.json'); return true; } catch { return false; }
+  })());
+  check('the atob guard is actually present',
+    /\} catch \{\s*\n\s*\/\/ Not base64 at all/.test(appSrc));
+
+  // --- 2. the evening nudge looks ahead -------------------------------------
+  check('it reads tomorrow’s commitments',
+    /eventsForDay\(env, tomorrowDay, tomorrowISO\)/.test(indexSrc)
+    && /scheduleForDate\(env, tomorrowISO\)/.test(indexSrc));
+  check('and what is due tomorrow', /t\.deadline === tomorrowISO/.test(indexSrc));
+
+  // --- 3. voice capture -----------------------------------------------------
+  // The token is shown once and is 43 characters. On a phone that is unusable
+  // without a copy button - which the feed URL had and this did not.
+  check('the token can be copied in one tap', /id="shortcut-copy"/.test(htmlSrc));
+  check('both secrets share one copier',
+    /copyField\('feed-url', 'feed-status'\)/.test(appSrc)
+    && /copyField\('shortcut-token', 'shortcut-status'\)/.test(appSrc));
+  check('a refused clipboard selects instead of failing',
+    /setSelectionRange\(0, value\.length\)/.test(appSrc));
+  check('a Shortcut token is an ordinary revocable session',
+    /createSession\(env, 'Siri Shortcut'\)/.test(indexSrc));
+  check('quick add keeps the time it parsed', /start_time: parsed\.time,/.test(indexSrc));
+  check('and can create an event, not only a task',
+    /const wantsEvent = body\.kind \? body\.kind === 'event' : parsed\.kind === 'event';/.test(indexSrc));
+  check('a weekly dictation becomes a weekly commitment',
+    /\.\.\.\(parsed\.repeatsWeekly[\s\S]{0,120}day_of_week: parsed\.dayOfWeek/.test(indexSrc));
+
+  const { parseQuickAdd } = await import('../public/parse.js');
+  const TUE = '2026-08-25';
+  // "next monday" resolved the date and left the word in the title.
+  check('"next monday" is consumed, not half-consumed',
+    parseQuickAdd('Renew the licence next monday', TUE).title === 'Renew the licence');
+  check('so are "this" and "on"',
+    parseQuickAdd('Call John on friday', TUE).title === 'Call John'
+    && parseQuickAdd('Dinner this thursday 7pm-9pm', TUE).title === 'Dinner');
+  check('a bare weekday still works',
+    parseQuickAdd('Sign reports friday', TUE).deadline === '2026-08-28');
+  // "next" that is not a date must survive untouched.
+  check('an unrelated "next" is left alone',
+    parseQuickAdd('Buy a next generation monitor', TUE).title === 'Buy a next generation monitor');
+
+  // A spoken "#" is transcribed as the literal word "hashtag", so the only
+  // folder syntax the parser had was unreachable by voice and every dictated
+  // task landed in the fallback folder.
+  const cat = (line) => parseQuickAdd(line, TUE).category;
+  const titleOf = (line) => parseQuickAdd(line, TUE).title;
+  check('a dictated hash sets the folder',
+    cat('Call the lab friday 3pm hashtag work') === 'work'
+    && titleOf('Call the lab friday 3pm hashtag work') === 'Call the lab');
+  check('so does a trailing "for <folder>"',
+    cat('Call the lab friday 3pm for work') === 'work'
+    && cat('Peloton tomorrow for fitness') === 'fitness'
+    && cat('Book the flights for personal') === 'personal');
+  // The trailing match runs after dates are lifted out, or "friday" is still
+  // in the way when we ask what the last words are.
+  check('and still reads it when a date follows',
+    cat('Prep the talk for work friday') === 'work'
+    && titleOf('Prep the talk for work friday') === 'Prep the talk');
+  check('the typed hash is unchanged', cat('Call the lab friday 3pm #work') === 'work');
+  // Anchoring is the whole defence against eating ordinary words.
+  check('"for <folder>" mid-sentence is left alone',
+    cat('Sign the form for personal reasons') === null
+    && titleOf('Sign the form for personal reasons') === 'Sign the form for personal reasons');
+  check('and so is an incidental mention of a folder name',
+    cat('Bring the laptop to work') === null && cat('Order a new work phone') === null);
+
+  // "next thursday" said on a Tuesday means nine days away, not two. It used
+  // to resolve the same as a bare weekday - tolerable when the stray "next"
+  // was left in the title as a hint, indefensible once it was swallowed, and
+  // dangerous by voice where there is no preview at all.
+  const due = (line, today) => parseQuickAdd(line, today).deadline;
+  check('"next <weekday>" is the following week',
+    due('X next thursday', '2026-08-25') === '2026-09-03');
+  check('"this <weekday>" and a bare one are the next one coming',
+    due('X this thursday', '2026-08-25') === '2026-08-27'
+    && due('X thursday', '2026-08-25') === '2026-08-27'
+    && due('X on thursday', '2026-08-25') === '2026-08-27');
+  // Weeks run Monday-Sunday: with a Sunday start, "next Thursday" said on a
+  // Sunday would land ten days out.
+  check('a Sunday does not send it ten days away',
+    due('X next thursday', '2026-08-30') === '2026-09-03');
+  check('and on the day itself it still means next week',
+    due('X next thursday', '2026-08-27') === '2026-09-03');
+  check('"next monday" and "next week" never disagree',
+    ['2026-08-25', '2026-08-27', '2026-08-30', '2026-08-31'].every(
+      (d) => due('X next monday', d) === due('X next week', d)));
+
+  // Dictation has no preview, so the endpoint can hand back a receipt.
+  const { captureSummary } = await import('../src/index.js');
+  check('a task receipt names the day, the time and the folder',
+    captureSummary('task', { title: 'Call the lab', deadline: '2026-08-28',
+      start_time: '15:00', category: 'work' }) === 'Task: Call the lab — Fri 28 Aug, 3pm, Work');
+  check('an undated task still reads sensibly',
+    captureSummary('task', { title: 'Buy milk', category: 'personal' }) === 'Task: Buy milk — Personal');
+  check('a one-off event names its date',
+    captureSummary('event', { title: 'Dinner', date: '2026-08-27',
+      start_time: '19:00', end_time: '21:30' }) === 'Event: Dinner — Thu 27 Aug, 7pm-9:30pm');
+  check('a weekly commitment says which day it repeats',
+    captureSummary('event', { title: 'Clinic', date: null, day_of_week: 2,
+      start_time: '08:00', end_time: '12:00' }) === 'Event: Clinic — every Tuesday, 8am-12pm');
+  check('a renamed folder is used in the receipt',
+    /Training/.test(captureSummary('task', { title: 'X', category: 'fitness' }, { fitness: 'Training' })));
+  check('?format=text returns the bare sentence',
+    /const wantsText = url\.searchParams\.get\('format'\) === 'text';/.test(indexSrc)
+    && /if \(wantsText\) return text\(taskSummary, 201\);/.test(indexSrc));
+  check('and JSON callers still get the whole object plus the summary',
+    /return json\(\{ ok: true, kind: 'task', summary: taskSummary, task \}, 201\);/.test(indexSrc));
+
+  // --- 4. the day plan ------------------------------------------------------
+  const { planDay, carve, DEFAULT_MINUTES } = await import('../src/dayplan.js');
+  const windows = [{ start: 7 * 60, end: 12 * 60 }, { start: 17.5 * 60, end: 19 * 60 }];
+
+  const morning = planDay({ windows, nowMinutes: 7 * 60, tasks: [
+    { title: 'A', estimate_minutes: 45 }, { title: 'B', estimate_minutes: 90 },
+    { title: 'C', estimate_minutes: 300 }, { title: 'D' },
+  ] });
+  check('tasks are laid into the gaps in order',
+    morning.blocks.map((b) => b.task.title).join('') === 'ABD');
+  check('blocks do not overlap',
+    morning.blocks.every((b, i, all) => i === 0 || b.start >= all[i - 1].end));
+  check('a task with no estimate gets the default',
+    morning.blocks.find((b) => b.task.title === 'D').end
+    - morning.blocks.find((b) => b.task.title === 'D').start === DEFAULT_MINUTES);
+  check('what does not fit is reported, not dropped',
+    morning.unplaced.length === 1 && morning.unplaced[0].task.title === 'C');
+
+  const pinnedPlan = planDay({ windows, nowMinutes: 7 * 60, tasks: [
+    { title: 'Lab', start_time: '15:00', estimate_minutes: 15 },
+    { title: 'Reports', estimate_minutes: 45 },
+  ] });
+  const lab = pinnedPlan.blocks.find((b) => b.task.title === 'Lab');
+  check('a pinned task keeps the hour you chose', lab.start === 15 * 60 && lab.pinned);
+  // Placed anyway, because moving it silently would be worse - but flagged.
+  check('and a clash with committed time is flagged, not hidden',
+    lab.conflict === true && pinnedPlan.conflicts === 1);
+
+  const late = planDay({ windows, nowMinutes: 14 * 60, tasks: [
+    { title: 'Missed', start_time: '09:00', estimate_minutes: 20 },
+    { title: 'Later', estimate_minutes: 45 },
+  ] });
+  check('nothing is scheduled into time that has gone',
+    late.blocks.every((b) => b.start >= 14 * 60));
+  check('a pinned hour already past is reported as past',
+    late.unplaced.some((u) => u.reason === 'already past'));
+
+  check('a full day plans nothing and says so',
+    planDay({ windows: [], nowMinutes: 7 * 60, tasks: [{ title: 'X' }] }).blocks.length === 0);
+  check('carve leaves no useless slivers',
+    carve([{ start: 0, end: 100 }], [{ start: 5, end: 95 }]).length === 0);
+  check('spare is measured from what is left, not by subtraction',
+    pinnedPlan.spare === pinnedPlan.blocks
+      .filter((b) => !b.conflict)
+      .reduce((n) => n, windows.reduce((n, w) => n + (w.end - w.start), 0) - 45));
+
+  check('the plan is never stored', !/INSERT INTO day_plan|day_plan/.test(indexSrc));
+  check('it is recomputed each time the panel opens',
+    /if \(opening\) await loadPlan\(\);/.test(appSrc));
+  check('what did not fit is shown to you', /Did not fit: \$\{named\.join/.test(appSrc));
+  // On a day with no working time left, every task "did not fit" - repeating
+  // the whole list back is noise, and the summary already said why.
+  check('but not when there was no time to begin with',
+    /plan\.unplaced\.length && plan\.available > 0/.test(appSrc));
+  check('and a long list is truncated', /and \$\{rest\} more/.test(appSrc));
+}
+
 // --- run --------------------------------------------------------------------
 
 await testPushRoundTrip();
@@ -2202,6 +2952,9 @@ await testDemoLock();
 await testBackupEncryption();
 await testInterchange();
 await testVision();
+await testTypedEvents();
+await testSecondPass();
+await testNewFeatures();
 
 console.log(failures === 0 ? '\nAll checks passed.\n' : `\n${failures} check(s) failed.\n`);
 process.exit(failures === 0 ? 0 : 1);

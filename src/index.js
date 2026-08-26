@@ -9,15 +9,15 @@ import {
   RECUR_OPTIONS,
 } from './recurrence.js';
 import {
-  listEvents, eventsForDay, createEvent, updateEvent, deleteEvent,
-  eventMinutes, eventLabel, eventsDigestLine,
+  listEvents, eventsForDay, upcomingEvents, createEvent, updateEvent, deleteEvent,
+  eventMinutes, eventLabel, eventsDigestLine, cleanTime, purgePastEvents,
 } from './events.js';
 import {
   syncSchedule, scheduleForDate, scheduleFrom, getMappings, saveMapping,
   deleteMapping, entryMinutes, scheduleDigestLine, REFRESH_HOURS,
   clinicalMinutesForDay, busyIntervals, nextFreeDays,
 } from './schedule.js';
-import { longestFreeWindow, toClock } from './freetime.js';
+import { longestFreeWindow, freeWindows, toClock } from './freetime.js';
 import { parseQuickAdd } from '../public/parse.js';
 import { backupToDrive, isConfigured as driveConfigured } from './gdrive.js';
 import { inspectExport, restoreExport } from './restore.js';
@@ -25,6 +25,8 @@ import {
   encryptBackup, decryptBackup, isEncryptedBackup, toBase64, fromBase64,
 } from './backup-crypto.js';
 import { seedDemo } from './demo.js';
+import { buildFeed } from './feed.js';
+import { planDay } from './dayplan.js';
 import { tasksToCsv, tasksToMarkdown, importTasks } from './interchange.js';
 import { readImage } from './vision.js';
 import {
@@ -43,7 +45,34 @@ const json = (data, status = 200) =>
     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
   });
 
+/** A bare sentence, for callers that can only display what they are handed. */
+const text = (body, status = 200) =>
+  new Response(String(body), {
+    status,
+    headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' },
+  });
+
 /** Length-independent-ish comparison so the passphrase check isn't a timing oracle. */
+/**
+ * The calendar feed's own token.
+ *
+ * Deliberately not a session token. A subscription URL is handed to Apple or
+ * Google and then re-fetched by their servers forever, so it is the least
+ * private credential the app has: it cannot be rotated by signing out, it
+ * travels in a URL, and it will sit in someone else's logs. Keeping it
+ * separate means it grants exactly one thing - read-only calendar text - and
+ * can be revoked on its own without logging you off every device.
+ *
+ * 32 base32 characters is 160 bits, which is not guessable at any rate a
+ * public endpoint could be probed at.
+ */
+const FEED_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+
+function newFeedToken() {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return [...bytes].map((b) => FEED_ALPHABET[b % 32]).join('');
+}
+
 function safeEqual(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
   const enc = new TextEncoder();
@@ -87,6 +116,31 @@ function localNow(timeZone, date = new Date()) {
   return { date: `${get('year')}-${get('month')}-${get('day')}`, hour };
 }
 
+/** Minutes past local midnight. The day plan needs finer grain than the hour. */
+function localMinutes(timeZone, date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(date);
+  const get = (type) => Number(parts.find((p) => p.type === type)?.value ?? 0);
+  return (get('hour') % 24) * 60 + get('minute');
+}
+
+/**
+ * The bounds of a working day, in minutes past midnight.
+ *
+ * Shared with the free-time maths so "no free time today" and an empty day
+ * plan always agree; two different ideas of when the day starts would have
+ * them contradicting each other on screen.
+ */
+async function planBounds(env) {
+  const start = Number(await getSetting(env, 'day_start_minutes', String(7 * 60)));
+  const end = Number(await getSetting(env, 'day_end_minutes', String(19 * 60)));
+  return {
+    dayStart: Number.isFinite(start) ? start : 7 * 60,
+    dayEnd: Number.isFinite(end) && end > start ? end : 19 * 60,
+  };
+}
+
 async function getSetting(env, key, fallback) {
   const row = await env.DB.prepare('SELECT value FROM meta WHERE key = ?').bind(key).first();
   return row?.value ?? fallback;
@@ -106,7 +160,12 @@ async function settings(env) {
   // 0 means "keep everything forever".
   const archiveAfterDays = Number(await getSetting(env, 'archive_after_days', '90'));
   // Comma-separated weekday numbers, 0 = Sunday. Empty means never.
-  const eveningDays = String(await getSetting(env, 'evening_days', '0'));
+  //
+  // Every night by default. It used to be Sunday only, from when the nudge
+  // just tallied what was still open - a weekly guilt report. Now that it says
+  // what tomorrow holds, the night before is the only time it is useful, and
+  // that is every night.
+  const eveningDays = String(await getSetting(env, 'evening_days', '0,1,2,3,4,5,6'));
   const eveningHour = Number(await getSetting(env, 'evening_hour', '20'));
   return { timezone, notifyHour, dailyCapacity, archiveAfterDays, eveningDays, eveningHour };
 }
@@ -209,12 +268,38 @@ function cleanTask(input) {
     notes: String(input.notes ?? '').slice(0, 4000),
     category: cleanCategory(input.category),
     deadline: cleanDeadline(input.deadline),
+    // Optional, and validated by the same routine an event's time uses, so
+    // "3pm" means the same thing whichever kind of thing you typed it on.
+    start_time: cleanTime(input.start_time),
     priority,
     estimate_minutes: estimate,
     recur: cleanRecur(input.recur),
     subtasks: JSON.stringify(cleanSubtasks(input.subtasks)),
     hide_until_due: input.hide_until_due ? 1 : 0,
   };
+}
+
+/**
+ * The checklist a repeating task starts its next round with.
+ *
+ * The steps carry over; the ticks do not. A weekly review that arrives with
+ * last week's boxes already ticked is worse than no checklist at all - you
+ * cannot tell what you have actually done this time.
+ *
+ * Until this existed the next occurrence was inserted without a subtasks
+ * column at all, so it defaulted to '[]' and the checklist was silently gone
+ * the first time the task repeated - the work of writing it out lost on the
+ * one kind of task most likely to need it again.
+ */
+function nextSubtasks(raw) {
+  try {
+    const steps = JSON.parse(raw || '[]');
+    if (!Array.isArray(steps)) return '[]';
+    return JSON.stringify(steps.map((s) => ({ text: String(s.text ?? ''), done: false }))
+      .filter((s) => s.text));
+  } catch {
+    return '[]';
+  }
 }
 
 /**
@@ -234,12 +319,13 @@ async function scheduleNextOccurrence(env, task, todayISO) {
   const timestamp = nowISO();
   await env.DB.prepare(
     `INSERT INTO tasks
-       (id, title, notes, category, deadline, priority, estimate_minutes, status, recur,
-        hide_until_due, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)`,
+       (id, title, notes, category, deadline, start_time, priority, estimate_minutes, status, recur,
+        subtasks, hide_until_due, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)`,
   ).bind(
-    id, task.title, task.notes, task.category, nextDeadline,
+    id, task.title, task.notes, task.category, nextDeadline, task.start_time ?? null,
     task.priority, task.estimate_minutes, rule,
+    nextSubtasks(task.subtasks),
     Number(task.hide_until_due) ? 1 : 0, timestamp, timestamp,
   ).run();
 
@@ -256,6 +342,9 @@ async function scheduleNextOccurrence(env, task, todayISO) {
  * credentials, trivially recreated by signing in again, and a file sitting in
  * cloud storage is a bad place for either.
  */
+/** Meta keys that must never leave in a backup. Credentials, not settings. */
+const EXPORT_EXCLUDED_META = new Set(['feed_token']);
+
 async function buildExport(env, timezone) {
   const tables = ['tasks', 'events', 'workout_plan', 'workout_log',
     'schedule_days', 'service_hours', 'meta'];
@@ -265,6 +354,14 @@ async function buildExport(env, timezone) {
     const { results } = await env.DB.prepare(`SELECT * FROM ${table}`).all();
     data[table] = results ?? [];
   }
+
+  // The calendar feed token is a credential, not a setting. It lives in meta
+  // for storage reasons, but a backup is a file that gets downloaded, emailed
+  // to yourself and left in Downloads - and anyone holding this string can read
+  // your calendar without signing in. It is excluded on the same grounds as
+  // sessions and push subscriptions: trivially recreated, and a bad thing to
+  // have lying around in a file.
+  data.meta = data.meta.filter((row) => !EXPORT_EXCLUDED_META.has(String(row?.key)));
 
   return {
     exported_at: nowISO(),
@@ -477,9 +574,9 @@ async function safeScheduleForToday(env, todayISO) {
 }
 
 /** Today's commitments, or an empty list if the feature is unavailable. */
-async function safeEventsForToday(env, timezone) {
+async function safeEventsForToday(env, timezone, todayISO = null) {
   try {
-    return await eventsForDay(env, localDayOfWeek(timezone));
+    return await eventsForDay(env, localDayOfWeek(timezone), todayISO);
   } catch (error) {
     console.error('Weekly events unavailable', error);
     return [];
@@ -525,7 +622,7 @@ async function sendDigestToAllDevices(env, todayISO, timezone) {
 
   // Commitments first: they frame everything below them. Knowing you are on
   // service until six changes how three open tasks should feel.
-  const todayEvents = timezone ? await safeEventsForToday(env, timezone) : [];
+  const todayEvents = timezone ? await safeEventsForToday(env, timezone, todayISO) : [];
   const clinical = await safeScheduleForToday(env, todayISO);
   const mappings = await getMappings(env).catch(() => []);
 
@@ -686,6 +783,108 @@ async function sendWeeklyReview(env, todayISO) {
  * the condition takes care of itself and the same mechanism covers anything
  * else left hanging.
  */
+/**
+ * The evening nudge.
+ *
+ * It used to list only what was still owed today, which answers "what did I
+ * not get to" - a question you can already feel the answer to at nine at
+ * night. What you actually want before bed is what tomorrow looks like, since
+ * that is the last moment you can do anything about it: a clinic morning and
+ * three things due is a different evening from a clear Saturday.
+ */
+/**
+ * The text of the evening nudge, given what was found.
+ *
+ * Pure, and exported, so the wording can be checked against real shapes - a
+ * quiet night, an overdue pile, a clear tomorrow - without a database or a
+ * push subscription in the way.
+ */
+/**
+ * A one-line receipt for something just captured.
+ *
+ * Typing gives you a preview before you commit; dictation gives you nothing -
+ * you speak and find out whenever you next open the app. Siri also mishears
+ * ("grand rounds" becomes "ground rounds"), which is exactly the kind of thing
+ * you would catch in the second it takes to read a notification and never
+ * catch three days later. So the capture endpoint can hand back a sentence
+ * plain enough to show on a lock screen.
+ */
+export function captureSummary(kind, row, labels = DEFAULT_FOLDER_LABELS) {
+  const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  const when = (isoDate) => {
+    if (!isoDate) return null;
+    const d = new Date(`${isoDate}T00:00:00Z`);
+    if (Number.isNaN(d.getTime())) return null;
+    return `${DAYS[d.getUTCDay()]} ${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
+  };
+
+  const clock = (hhmm) => {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm ?? ''));
+    if (!m) return null;
+    const h = Number(m[1]);
+    const min = Number(m[2]);
+    return `${((h + 11) % 12) + 1}${min ? `:${String(min).padStart(2, '0')}` : ''}${h < 12 ? 'am' : 'pm'}`;
+  };
+
+  if (kind === 'event') {
+    const span = [clock(row.start_time), clock(row.end_time)].filter(Boolean).join('-');
+    const day = row.date
+      ? when(row.date)
+      : `every ${['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][row.day_of_week]}`;
+    return `Event: ${row.title} — ${[day, span].filter(Boolean).join(', ')}`;
+  }
+
+  const folder = labels[row.category] || DEFAULT_FOLDER_LABELS[row.category] || row.category;
+  const bits = [when(row.deadline), clock(row.start_time), folder].filter(Boolean);
+  return `Task: ${row.title}${bits.length ? ` — ${bits.join(', ')}` : ''}`;
+}
+
+export function composeEveningNudge({ outstanding, ahead, dueTomorrow, todayISO }) {
+  if (!outstanding.length && !ahead.length && !dueTomorrow.length) return null;
+
+  const lines = [];
+
+  if (outstanding.length) {
+    // A task set to hide until its due date is invisible every other day, so
+    // tonight is its only appearance - and the list is sorted oldest-deadline
+    // first, which puts it behind every overdue item. Three stale things would
+    // silently push out the one thing that can only be seen today. So they are
+    // pinned to the front, and the backlog fills whatever is left.
+    const surfacing = outstanding.filter(
+      (t) => Number(t.hide_until_due) && t.deadline === todayISO);
+    const rest = outstanding.filter((t) => !surfacing.includes(t));
+
+    const shown = [...surfacing, ...rest].slice(0, Math.max(3, surfacing.length));
+    lines.push(...shown.map((t) => `• ${t.title}`));
+    if (outstanding.length > shown.length) {
+      lines.push(`+${outstanding.length - shown.length} more`);
+    }
+  }
+
+  if (ahead.length || dueTomorrow.length) {
+    const due = dueTomorrow.length ? `${dueTomorrow.length} due` : null;
+    const summary = [...ahead, due].filter(Boolean).join(' · ') || 'clear';
+    if (lines.length) {
+      // A blank line only if there is something above it to separate from, and
+      // the word "Tomorrow" only when the title above is about tonight.
+      lines.push('', `Tomorrow: ${summary}`);
+    } else {
+      lines.push(summary);
+    }
+  }
+
+  const overdue = outstanding.filter((t) => t.deadline < todayISO).length;
+  return {
+    title: overdue ? `Still open — ${overdue} overdue`
+      : outstanding.length ? 'Still open tonight'
+        : 'Tomorrow',
+    body: lines.join('\n'),
+  };
+}
+
 async function sendEveningNudge(env, todayISO) {
   const { results } = await env.DB.prepare(
     "SELECT id, title, deadline, snoozed_until, priority FROM tasks WHERE status = 'open'",
@@ -700,17 +899,35 @@ async function sendEveningNudge(env, todayISO) {
     .sort((a, b) => String(a.deadline).localeCompare(String(b.deadline))
       || Number(a.priority) - Number(b.priority));
 
-  if (!outstanding.length) return { sent: 0, skipped: true, reason: 'Nothing outstanding' };
+  // --- what tomorrow already has on it --------------------------------------
+  const tomorrowISO = new Date(Date.parse(`${todayISO}T00:00:00Z`) + 86400000)
+    .toISOString().slice(0, 10);
+  const tomorrowDay = new Date(`${tomorrowISO}T00:00:00Z`).getUTCDay();
 
-  const top = outstanding.slice(0, 4);
-  const lines = top.map((t) => `• ${t.title}`);
-  if (outstanding.length > top.length) lines.push(`+${outstanding.length - top.length} more`);
+  const [tomorrowEvents, tomorrowClinical, mappings] = await Promise.all([
+    eventsForDay(env, tomorrowDay, tomorrowISO).catch(() => []),
+    scheduleForDate(env, tomorrowISO).catch(() => []),
+    getMappings(env).catch(() => []),
+  ]);
 
-  const overdue = outstanding.filter((t) => t.deadline < todayISO).length;
+  const dueTomorrow = (results ?? [])
+    .filter((t) => !/^workout-/.test(t.id))
+    .filter((t) => t.deadline === tomorrowISO)
+    .filter((t) => !isSnoozed(t, tomorrowISO));
+
+  const ahead = [
+    scheduleDigestLine(tomorrowClinical, mappings),
+    eventsDigestLine(tomorrowEvents),
+  ].filter(Boolean);
+
+  // Nothing owed and nothing booked is a quiet evening, not a notification.
+  const note = composeEveningNudge({ outstanding, ahead, dueTomorrow, todayISO });
+  if (!note) {
+    return { sent: 0, skipped: true, reason: 'Nothing outstanding, nothing tomorrow' };
+  }
 
   return pushToAllDevices(env, {
-    title: overdue ? `Still open — ${overdue} overdue` : 'Still open tonight',
-    body: lines.join('\n'),
+    ...note,
     tag: `evening-${todayISO}`,
     url: '/',
   });
@@ -731,6 +948,47 @@ async function sendSecurityAlert(env, ip, failures, retryAfter) {
 // --------------------------------------------------------------------------
 // API
 // --------------------------------------------------------------------------
+
+/**
+ * Serve the subscribable calendar.
+ *
+ * No session, no cookie: whoever holds the token in the path gets the text.
+ * That is what makes it subscribable and also what makes it worth being able
+ * to revoke, which Settings can do by minting a new one.
+ */
+async function handleFeed(request, env, url) {
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    return new Response('Method not allowed', { status: 405 });
+  }
+
+  const stored = await getSetting(env, 'feed_token', '');
+  const presented = decodeURIComponent(url.pathname.slice('/feed/'.length))
+    .replace(/\.ics$/i, '');
+
+  // An unconfigured feed must not be openable with an empty token.
+  if (!stored || !safeEqual(presented, stored)) {
+    return new Response('Not found', { status: 404 });
+  }
+
+  const { timezone } = await settings(env);
+  const today = localNow(timezone).date;
+  const body = await buildFeed(env, today, timezone, env.FEED_NAME || 'To Do');
+
+  return new Response(request.method === 'HEAD' ? null : body, {
+    headers: {
+      'Content-Type': 'text/calendar; charset=utf-8',
+      'Content-Disposition': 'inline; filename="todo.ics"',
+      // Whoever holds the URL can read it, so nothing may cache it on the way
+      // and no crawler may keep it. no-store rather than a short max-age: a
+      // subscribing client re-fetches hourly at most, so caching saves nothing
+      // real, while a cached copy keeps a revoked feed readable after the
+      // token is gone - and revocation being immediate is the whole point of
+      // being able to regenerate the link.
+      'Cache-Control': 'no-store',
+      'X-Robots-Tag': 'noindex, nofollow',
+    },
+  });
+}
 
 async function handleApi(request, env, url) {
   const path = url.pathname;
@@ -920,10 +1178,10 @@ async function handleApi(request, env, url) {
     const id = newId();
     const timestamp = nowISO();
     await env.DB.prepare(
-      `INSERT INTO tasks (id, title, notes, category, deadline, priority, estimate_minutes, status, recur, subtasks, hide_until_due, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, title, notes, category, deadline, start_time, priority, estimate_minutes, status, recur, subtasks, hide_until_due, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)`,
     ).bind(
-      id, fields.title, fields.notes, fields.category, fields.deadline,
+      id, fields.title, fields.notes, fields.category, fields.deadline, fields.start_time,
       fields.priority, fields.estimate_minutes, fields.recur, fields.subtasks,
       fields.hide_until_due, timestamp, timestamp,
     ).run();
@@ -975,7 +1233,7 @@ async function handleApi(request, env, url) {
           .bind(until, nowISO(), id).run();
       }
 
-      const editable = ['title', 'notes', 'category', 'deadline', 'priority', 'estimate_minutes', 'recur', 'subtasks'];
+      const editable = ['title', 'notes', 'category', 'deadline', 'start_time', 'priority', 'estimate_minutes', 'recur', 'subtasks', 'hide_until_due'];
       if (editable.some((k) => body[k] !== undefined)) {
         let fields;
         try {
@@ -984,11 +1242,11 @@ async function handleApi(request, env, url) {
           return json({ error: String(error.message) }, 400);
         }
         await env.DB.prepare(
-          `UPDATE tasks SET title = ?, notes = ?, category = ?, deadline = ?, priority = ?,
-                            estimate_minutes = ?, recur = ?, subtasks = ?,
+          `UPDATE tasks SET title = ?, notes = ?, category = ?, deadline = ?, start_time = ?,
+                            priority = ?, estimate_minutes = ?, recur = ?, subtasks = ?,
                             hide_until_due = ?, updated_at = ? WHERE id = ?`,
         ).bind(
-          fields.title, fields.notes, fields.category, fields.deadline,
+          fields.title, fields.notes, fields.category, fields.deadline, fields.start_time,
           fields.priority, fields.estimate_minutes, fields.recur, fields.subtasks,
           fields.hide_until_due, nowISO(), id,
         ).run();
@@ -1019,7 +1277,7 @@ async function handleApi(request, env, url) {
     const todayPlan = await safePlanForToday(env, timezone);
     if (todayPlan?.duration_minutes) workload.minutes += todayPlan.duration_minutes;
 
-    const todayEvents = await safeEventsForToday(env, timezone);
+    const todayEvents = await safeEventsForToday(env, timezone, today);
     const clinical = await safeScheduleForToday(env, today);
     const mappings = await getMappings(env).catch(() => []);
 
@@ -1038,6 +1296,10 @@ async function handleApi(request, env, url) {
         .filter((e) => e.date > today)
         .map((e) => ({ ...e, minutes: entryMinutes(e, mappings) })),
       events: todayEvents.map((e) => ({ ...e, label: eventLabel(e) })),
+      // One-offs ahead of today, so an event added for Thursday is visible
+      // before Thursday rather than only in that morning's brief.
+      upcomingEvents: (await upcomingEvents(env, today, 21).catch(() => []))
+        .map((e) => ({ ...e, label: eventLabel(e) })),
       workload: {
         ...workload,
         committed,
@@ -1180,35 +1442,69 @@ async function handleApi(request, env, url) {
   }
 
   // --- quick add from plain text ----------------------------------------------
+  /**
+   * One line of text in, one task or event out.
+   *
+   * This is what a Siri Shortcut talks to, so it has to behave exactly like
+   * typing the same words into the box - it shares the browser's parser for
+   * precisely that reason. It previously ignored two of the parser's answers:
+   * the time of day, and whether the line described an event at all, so
+   * dictating "dinner thursday 7pm-9pm" filed a task called dinner.
+   */
   if (path === '/api/quick' && method === 'POST') {
     const body = await request.json().catch(() => ({}));
-    const text = String(body.text ?? '').trim();
-    if (!text) return json({ error: 'Nothing to add' }, 400);
+    const spoken = String(body.text ?? '').trim();
+    if (!spoken) return json({ error: 'Nothing to add' }, 400);
 
-    // The same parser the browser uses, so a dictated task and a typed one
-    // behave identically rather than diverging over time.
-    const parsed = parseQuickAdd(text, today);
+    const parsed = parseQuickAdd(spoken, today);
+
+    // A Shortcut can only show what it is handed, and digging a field out of
+    // JSON costs two more actions on the phone. ?format=text hands back the
+    // receipt as a bare sentence it can put straight into a notification.
+    const wantsText = url.searchParams.get('format') === 'text';
+
+    // `kind` lets a caller overrule the parser, the way the pill does in the
+    // browser. Unset means take the parser's word for it.
+    const wantsEvent = body.kind ? body.kind === 'event' : parsed.kind === 'event';
+
+    if (wantsEvent) {
+      const event = await createEvent(env, {
+        title: parsed.title,
+        ...(parsed.repeatsWeekly
+          ? { day_of_week: parsed.dayOfWeek }
+          : { date: parsed.date || parsed.deadline || today }),
+        start_time: parsed.time ?? null,
+        end_time: parsed.endTime ?? null,
+      });
+      const eventSummary = captureSummary('event', event, await folderLabels(env));
+      if (wantsText) return text(eventSummary, 201);
+      return json({ ok: true, kind: 'event', summary: eventSummary, event }, 201);
+    }
 
     const id = newId();
     const timestamp = nowISO();
     const fields = cleanTask({
       title: parsed.title,
       deadline: parsed.deadline,
+      start_time: parsed.time,
       priority: parsed.priority,
-      category: parsed.category || 'personal',
+      category: parsed.category || (body.category ?? 'personal'),
       estimate_minutes: parsed.estimate_minutes,
       recur: parsed.recur,
     });
 
     await env.DB.prepare(
-      `INSERT INTO tasks (id, title, notes, category, deadline, priority, estimate_minutes, status, recur, subtasks, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, '[]', ?, ?)`,
+      `INSERT INTO tasks (id, title, notes, category, deadline, start_time, priority, estimate_minutes, status, recur, subtasks, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, '[]', ?, ?)`,
     ).bind(
-      id, fields.title, fields.notes, fields.category, fields.deadline,
+      id, fields.title, fields.notes, fields.category, fields.deadline, fields.start_time,
       fields.priority, fields.estimate_minutes, fields.recur, timestamp, timestamp,
     ).run();
 
-    return json({ ok: true, task: await env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(id).first() }, 201);
+    const task = await env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(id).first();
+    const taskSummary = captureSummary('task', task, await folderLabels(env));
+    if (wantsText) return text(taskSummary, 201);
+    return json({ ok: true, kind: 'task', summary: taskSummary, task }, 201);
   }
 
   // --- export ----------------------------------------------------------------
@@ -1251,7 +1547,13 @@ async function handleApi(request, env, url) {
     // real data.
     if (env.DEMO_MODE !== 'true') return json({ error: 'Not found' }, 404);
     const result = await seedDemo(env, today);
-    return json({ ok: true, ...result });
+    // seedDemo clears the sessions table - a demo notification must not keep
+    // arriving on a stranger's phone - which also invalidates the token of
+    // whoever just pressed the button. Handing back a fresh one keeps the
+    // reset from dumping a visitor on a red "Session expired" screen, which
+    // reads as a broken app rather than as the reset working.
+    const token = await createSession(env, 'demo');
+    return json({ ok: true, token, ...result });
   }
 
   // --- camera capture --------------------------------------------------------
@@ -1381,11 +1683,11 @@ async function handleApi(request, env, url) {
     let added = 0;
     for (const t of parsed.tasks) {
       await env.DB.prepare(
-        `INSERT INTO tasks (id, title, notes, category, deadline, priority, estimate_minutes,
+        `INSERT INTO tasks (id, title, notes, category, deadline, start_time, priority, estimate_minutes,
                             status, recur, subtasks, hide_until_due, created_at, updated_at, completed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
       ).bind(
-        newId(), t.title, t.notes, t.category, t.deadline, t.priority,
+        newId(), t.title, t.notes, t.category, t.deadline, cleanTime(t.start_time), t.priority,
         t.estimate_minutes, t.status, cleanRecur(t.recur),
         JSON.stringify(t.subtasks), timestamp, timestamp,
         t.status === 'done' ? timestamp : null,
@@ -1469,12 +1771,104 @@ async function handleApi(request, env, url) {
   }
 
   // --- weekly events ---------------------------------------------------------
+  /**
+   * A token for a Siri Shortcut.
+   *
+   * An ordinary session, deliberately: it appears in the signed-in devices
+   * list, it is revoked with the same button as a phone, and its expiry slides
+   * forward every time it is used - so a Shortcut you actually use never stops
+   * working, and one you forget about eventually lapses on its own.
+   *
+   * Shown once. There is nowhere to look it up afterwards, which is the point:
+   * the app never stores a token it could leak, only a hash of one.
+   */
+  if (path === '/api/shortcut-token' && method === 'POST') {
+    const shortcutToken = await createSession(env, 'Siri Shortcut');
+    return json({
+      token: shortcutToken,
+      endpoint: `${url.origin}/api/quick`,
+    }, 201);
+  }
+
+  /**
+   * What today could actually look like.
+   *
+   * Nothing is stored. The plan is recomputed on every request from the rota,
+   * the commitments and the ranking, so it is always current and there is
+   * never a stale saved schedule to reconcile against reality.
+   */
+  if (path === '/api/day-plan' && method === 'GET') {
+    const dayOfWeek = localDayOfWeek(timezone);
+    const [clinical, todayEvents, mappings, allTasks] = await Promise.all([
+      safeScheduleForToday(env, today),
+      safeEventsForToday(env, timezone, today),
+      getMappings(env).catch(() => []),
+      env.DB.prepare("SELECT * FROM tasks WHERE status = 'open'").all()
+        .then((r) => r.results ?? []),
+    ]);
+
+    // The same eligibility the digest uses: no workouts (they have their own
+    // card), nothing snoozed, nothing hidden until its due date.
+    const eligible = allTasks
+      .filter((t) => !/^workout-\d{4}-\d{2}-\d{2}$/.test(t.id))
+      .filter((t) => !isSnoozed(t, today))
+      .filter((t) => !(Number(t.hide_until_due) && t.deadline && t.deadline > today));
+
+    const busy = busyIntervals(clinical, todayEvents, mappings);
+    const { dayStart, dayEnd } = await planBounds(env);
+    const windows = freeWindows(busy, dayStart, dayEnd);
+
+    const plan = planDay({
+      windows,
+      tasks: rankTasks(eligible, today),
+      nowMinutes: localMinutes(timezone),
+    });
+
+    return json({
+      ...plan,
+      dayOfWeek,
+      blocks: plan.blocks.map((b) => ({
+        start: b.start, end: b.end, pinned: b.pinned, conflict: Boolean(b.conflict),
+        id: b.task.id, title: b.task.title, category: b.task.category,
+        minutes: b.end - b.start,
+      })),
+      unplaced: plan.unplaced.map((u) => ({
+        id: u.task.id, title: u.task.title, reason: u.reason,
+      })),
+    });
+  }
+
+  // --- calendar feed ---------------------------------------------------------
+  if (path === '/api/feed' && method === 'GET') {
+    const feedToken = await getSetting(env, 'feed_token', '');
+    return json({
+      enabled: Boolean(feedToken),
+      url: feedToken ? `${url.origin}/feed/${feedToken}.ics` : null,
+    });
+  }
+
+  if (path === '/api/feed' && method === 'POST') {
+    // Minting always replaces. That is the revoke button as well as the enable
+    // button: any calendar still holding the old URL stops being served.
+    const feedToken = newFeedToken();
+    await setSetting(env, 'feed_token', feedToken);
+    return json({ enabled: true, url: `${url.origin}/feed/${feedToken}.ics` });
+  }
+
+  if (path === '/api/feed' && method === 'DELETE') {
+    await setSetting(env, 'feed_token', '');
+    return json({ enabled: false, url: null });
+  }
+
   if (path === '/api/events' && method === 'GET') {
-    const all = await listEvents(env);
+    const all = await listEvents(env, today);
     return json({
       events: all,
       dayNames: DAY_NAMES,
-      today: { day_of_week: localDayOfWeek(timezone) },
+      // The date matters as much as the weekday now. A one-off is "today" only
+      // on its own date; matching on weekday alone lit up a spent Thursday
+      // appointment every Thursday thereafter.
+      today: { day_of_week: localDayOfWeek(timezone), date: today },
     });
   }
 
@@ -1536,14 +1930,12 @@ async function handleApi(request, env, url) {
   }
 
   // --- send the digest right now, for testing --------------------------------
-  if (path === '/api/test-evening' && method === 'POST') {
-    return json(await sendEveningNudge(env, today));
-  }
-
-  if (path === '/api/test-review' && method === 'POST') {
-    return json(await sendWeeklyReview(env, today));
-  }
-
+  //
+  // Only the morning brief has a button behind it. /api/test-evening and
+  // /api/test-review were the same idea for the other two notifications and
+  // were never wired to anything - authenticated endpoints that fired real
+  // pushes to every device, reachable only by someone who already knew they
+  // existed. Removed rather than left as scenery.
   if (path === '/api/test-push' && method === 'POST') {
     await ensureWorkoutTask(env, today, timezone);
     const result = await sendDigestToAllDevices(env, today, timezone);
@@ -1617,6 +2009,20 @@ export default {
     // .dev.vars locally and from wrangler.toml in production.
     if (url.protocol === 'http:' && env.ENVIRONMENT !== 'development') {
       return Response.redirect(`https://${url.host}${url.pathname}${url.search}`, 301);
+    }
+
+    // The calendar feed. Deliberately outside /api/, because the whole point
+    // is that a calendar app can fetch it with no session - its own token in
+    // the path is the entire credential.
+    if (url.pathname.startsWith('/feed/')) {
+      let response;
+      try {
+        response = await handleFeed(request, env, url);
+      } catch (error) {
+        console.error('Feed error', error);
+        response = new Response('Feed unavailable', { status: 500 });
+      }
+      return withSecurityHeaders(response);
     }
 
     if (url.pathname.startsWith('/api/')) {
@@ -1781,6 +2187,12 @@ export default {
           }
         } catch (error) {
           console.error('Archive pass failed', error);
+        }
+        try {
+          const gone = await purgePastEvents(env, date);
+          if (gone) console.log(`Cleared ${gone} past one-off events`);
+        } catch (error) {
+          console.error('Event purge failed', error);
         }
       } catch (error) {
         console.error('Scheduled digest failed', error);

@@ -1,7 +1,7 @@
 :root {
-  --bg: #f7f7f5;
+  --bg: #f1f0ec;
   --surface: #ffffff;
-  --surface-2: #f0f0ed;
+  --surface-2: #e6e5e0;
   --border: #e2e2dd;
   --text: #1c1c1a;
   --muted: #71716c;
@@ -11,6 +11,18 @@
   --warn-bg: #fdf1e7;
   --warn-border: #e9c9a8;
   --warn-text: #8a4b16;
+  /* The three folder hues. Used by the folder tabs, the chips on task rows and
+   * the section marks - one definition so a tab and its chip can never drift
+   * apart. Each pairs with the text colour that stays legible on it. */
+  --hue-slate: #3d5a80;
+  --hue-slate-text: #ffffff;
+  --hue-violet: #6b5b95;
+  --hue-violet-text: #ffffff;
+  --hue-clay: #8a5a2b;
+  --hue-clay-text: #ffffff;
+  --hue-neutral: #6f6f69;
+  --hue-neutral-text: #ffffff;
+
   --radius: 12px;
   --radius-lg: 16px;
   --shadow: 0 1px 2px rgba(0, 0, 0, .05), 0 4px 16px rgba(0, 0, 0, .04);
@@ -18,7 +30,7 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #16161a;
+    --bg: #121216;
     --surface: #1e1e23;
     --surface-2: #26262c;
     --border: #33333b;
@@ -30,6 +42,14 @@
     --warn-bg: #2e2318;
     --warn-border: #4d3a24;
     --warn-text: #e8bd8c;
+    --hue-slate: #7fa3cc;
+    --hue-slate-text: #10202e;
+    --hue-violet: #b0a2d4;
+    --hue-violet-text: #1d1730;
+    --hue-clay: #d8a76a;
+    --hue-clay-text: #2a1c0c;
+    --hue-neutral: #9a9a95;
+    --hue-neutral-text: #16161a;
     --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 4px 16px rgba(0, 0, 0, .25);
   }
 }
@@ -95,13 +115,36 @@ p { margin: 0; }
   margin-bottom: 10px;
 }
 
+/* A short colored rule before each section heading. The eye catches the
+ * boundary before it reads the word, which is what stops the page reading as
+ * one undifferentiated column. --section-mark is overridden per section. */
+.section-label::before,
+.workout-label::before {
+  content: "";
+  display: inline-block;
+  width: 3px;
+  height: .85em;
+  border-radius: 2px;
+  background: var(--section-mark, var(--accent));
+  margin-right: 8px;
+  vertical-align: -1px;
+}
+
 /* folders ------------------------------------------------------------------ */
+/* The tabs are the same solid pills as the folder chips on a task row, in the
+ * same colours - a Work tab and a Work chip are the one label in two places.
+ * That only holds if the tab is full strength: a tint of the colour reads as a
+ * different colour sitting next to the chip it is meant to match. So the
+ * selected tab is marked by a ring rather than by being the only coloured one.
+ * The track is a rounded box on the same --radius as the task rows below it,
+ * not a lozenge - every other block on the page is a box, and a fully rounded
+ * row here read as a different kind of thing. */
 .folders {
   display: flex;
-  gap: 4px;
+  gap: 8px;
   background: var(--surface-2);
-  padding: 4px;
-  border-radius: 11px;
+  padding: 5px;
+  border-radius: var(--radius);
   margin-bottom: 24px;
 }
 
@@ -111,9 +154,9 @@ p { margin: 0; }
   font-size: .9rem;
   font-weight: 500;
   border: none;
-  background: transparent;
-  color: var(--muted);
-  padding: 8px 10px;
+  background: var(--folder-color);
+  color: var(--folder-color-text);
+  padding: 9px 10px;
   border-radius: 8px;
   cursor: pointer;
   display: flex;
@@ -121,31 +164,53 @@ p { margin: 0; }
   justify-content: center;
   gap: 6px;
 }
-.folder:hover { color: var(--text); }
+
+/* "All" spans every folder, so it has no colour of its own and takes the
+ * neutral of the set rather than opting out of the shape. */
+.folder[data-folder="all"] {
+  --folder-color: var(--hue-neutral);
+  --folder-color-text: var(--hue-neutral-text);
+}
+.folder[data-folder="work"] {
+  --folder-color: var(--hue-slate);
+  --folder-color-text: var(--hue-slate-text);
+}
+.folder[data-folder="personal"] {
+  --folder-color: var(--hue-violet);
+  --folder-color-text: var(--hue-violet-text);
+}
+.folder[data-folder="fitness"] {
+  --folder-color: var(--hue-clay);
+  --folder-color-text: var(--hue-clay-text);
+}
+
+.folder:hover { filter: brightness(1.07); }
+
+/* A halo in the tab's own colour, held off the pill by a ring of the track
+ * behind it so it reads as a ring and not as a thicker pill. The 5px of track
+ * padding is what gives the halo room to sit in. */
 .folder.is-active {
-  background: var(--surface);
-  color: var(--text);
-  box-shadow: var(--shadow);
+  font-weight: 600;
+  box-shadow: 0 0 0 2px var(--surface-2), 0 0 0 4px var(--folder-color);
 }
 
 .folder-count {
   font-size: .75rem;
   font-weight: 600;
-  color: var(--muted);
-  background: var(--bg);
   border-radius: 999px;
   padding: 1px 7px;
   min-width: 20px;
+  /* Tinted from the pill's own text colour, so it darkens on the light pills
+   * of dark mode instead of washing out. The rgba line is the fallback for
+   * browsers without color-mix. */
+  background: rgba(255, 255, 255, .25);
+  background: color-mix(in srgb, var(--folder-color-text) 22%, transparent);
+  color: var(--folder-color-text);
 }
-.folder.is-active .folder-count { background: var(--surface-2); }
 .folder-count:empty { display: none; }
 
-.chip.folder-work { background: #3d5a80; color: #fff; }
-.chip.folder-personal { background: #6b5b95; color: #fff; }
-@media (prefers-color-scheme: dark) {
-  .chip.folder-work { background: #7fa3cc; color: #10202e; }
-  .chip.folder-personal { background: #b0a2d4; color: #1d1730; }
-}
+.chip.folder-work { background: var(--hue-slate); color: var(--hue-slate-text); }
+.chip.folder-personal { background: var(--hue-violet); color: var(--hue-violet-text); }
 
 /* add form ---------------------------------------------------------------- */
 .add-toggle {
@@ -425,7 +490,7 @@ input:focus, textarea:focus, select:focus {
 }
 .chip.due-soon { background: var(--warn-bg); color: var(--warn-text); }
 .chip.overdue { background: var(--danger); color: #fff; }
-.chip.p1 { background: var(--accent); color: var(--accent-text); }
+.chip.p1 { background: transparent; color: var(--danger); box-shadow: inset 0 0 0 1px var(--danger); }
 
 /* settings sheet ----------------------------------------------------------- */
 .sheet {
@@ -521,6 +586,7 @@ input:focus, textarea:focus, select:focus {
 
 /* workout ------------------------------------------------------------------ */
 .workout {
+  --section-mark: var(--hue-clay);
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -555,10 +621,7 @@ input:focus, textarea:focus, select:focus {
 .workout-actions .btn { flex: 1; }
 .workout-logged { font-size: .88rem; color: var(--muted); margin-top: 12px; }
 
-.chip.folder-fitness { background: #8a5a2b; color: #fff; }
-@media (prefers-color-scheme: dark) {
-  .chip.folder-fitness { background: #d8a76a; color: #2a1c0c; }
-}
+.chip.folder-fitness { background: var(--hue-clay); color: var(--hue-clay-text); }
 
 /* weekly plan editor -------------------------------------------------------- */
 .plan-editor { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
@@ -637,6 +700,9 @@ input:focus, textarea:focus, select:focus {
 .subtask-add input { flex: 1; }
 
 .chip.progress { background: var(--surface-2); color: var(--muted); }
+/* A time of day, not a deadline. Quiet on purpose: it sits beside the due
+   chip, and two loud chips answering the same question compete. */
+.chip.at-time { background: var(--surface-2); color: var(--muted); font-variant-numeric: tabular-nums; }
 
 /* upcoming ----------------------------------------------------------------- */
 .day-heading {
@@ -667,7 +733,55 @@ input:focus, textarea:focus, select:focus {
   font-size: .72rem; text-transform: uppercase; letter-spacing: .05em;
   color: var(--muted); font-weight: 600; min-width: 34px;
 }
+/* A one-off carries a full date ("Thu 27 Aug"), so it needs the room a bare
+   weekday does not, and the accent marks it as the row that will expire. */
+.event-day.is-once {
+  min-width: 66px; color: var(--accent); letter-spacing: .03em;
+}
+/* Splits the weekly pattern from the one-off dates. Without a heading the two
+   were one undifferentiated list and a dated row read as a standing one. */
+.ev-heading {
+  text-transform: uppercase; letter-spacing: .06em; font-weight: 600;
+  margin: 12px 0 2px;
+}
+.event-list > .ev-heading:first-child { margin-top: 0; }
 .event-add { margin-top: 10px; }
+
+/* The feed URL is long, opaque and meant to be copied rather than read, so it
+   gets a monospace face and its own line rather than competing for width. */
+/* the day plan ------------------------------------------------------------- */
+.dayplan { margin: 0 0 10px; }
+.plan-panel {
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 10px 13px; margin-top: 8px;
+}
+.plan-blocks { list-style: none; margin: 6px 0 0; padding: 0; }
+.plan-block {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 5px 0; font-size: .9rem;
+  border-top: 1px solid var(--border);
+}
+.plan-block:first-child { border-top: 0; }
+.plan-time {
+  min-width: 62px; color: var(--muted); font-size: .8rem;
+  font-variant-numeric: tabular-nums;
+}
+.plan-title { flex: 1; min-width: 0; }
+.plan-mins { color: var(--muted); font-size: .8rem; font-variant-numeric: tabular-nums; }
+/* A block sitting on top of something you are already committed to. Marked
+   rather than hidden - it is still where you said you wanted it. */
+.plan-block.is-clash .plan-time { color: var(--danger); }
+.plan-block.is-clash .plan-title { text-decoration: underline wavy var(--danger); }
+
+#shortcut-token, #feed-url {
+  width: 100%; margin-bottom: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .78rem;
+}
+#shortcut-steps code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .74rem; background: var(--surface-2); padding: 1px 4px; border-radius: 4px;
+}
 
 /* clinical rows in the Upcoming view --------------------------------------- */
 .clinical-row {
@@ -686,6 +800,18 @@ input:focus, textarea:focus, select:focus {
 .clinical-hours { font-size: .8rem; color: var(--muted); }
 
 /* coming up ---------------------------------------------------------------- */
+#upcoming-section {
+  --section-mark: var(--hue-slate);
+  background: var(--surface-2);
+  border-radius: var(--radius-lg);
+  padding: 4px 16px 20px;
+  margin-top: 36px;
+}
+#upcoming-section .list-head { margin-top: 18px; }
+/* The panel is itself --surface-2, so the active range pill needs a different
+ * ground to stay readable against it. */
+#upcoming-section .range.is-active { background: var(--bg); }
+
 .upcoming-list { display: flex; flex-direction: column; gap: 6px; }
 
 .range {
@@ -695,14 +821,25 @@ input:focus, textarea:focus, select:focus {
 }
 .range.is-active { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
 
+/* Same shell as a rostered row. These sit inside the recessed Coming up panel,
+   and a task on --surface stood out as a white card among grey ones - which
+   read as an error rather than as a different kind of thing. */
 .upcoming-task {
-  display: flex; align-items: center; gap: 8px;
-  padding: 10px 13px;
-  background: var(--surface);
+  display: flex; align-items: center; gap: 9px;
+  padding: 9px 13px;
+  background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   font-size: .9rem;
   cursor: pointer;
+}
+
+/* Solid dot: a fixed commitment, on the roster or in the diary. Hollow dot: a
+   task - something you do, which can move. The kind is legible before the
+   folder chip is read. */
+.upcoming-task .clinical-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--muted);
 }
 .upcoming-task:hover { border-color: var(--muted); }
 
@@ -811,3 +948,39 @@ input:focus, textarea:focus, select:focus {
 
 /* A reading the model was unsure of, or one it refused. */
 .camera-result.is-warn { border-color: #b45309; }
+
+/* quick-add: what will this line become? --------------------------------- */
+
+.quick-preview .kind {
+  display: inline-block;
+  margin-right: 7px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: .68rem;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.quick-preview .kind.is-event { background: var(--hue-slate); color: var(--hue-slate-text); }
+
+/* The guess is a suggestion, so the correction sits right beside it. */
+.kind-flip {
+  margin-left: 8px;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+  font: inherit;
+  font-size: .78rem;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.kind-flip:hover { color: var(--text); }
+
+/* A one-off appointment in Upcoming. Same row shape as a rostered shift, in
+   the slate hue so the two read as different kinds of fixed commitment. */
+.clinical-row.is-event .clinical-dot { background: var(--hue-slate); }

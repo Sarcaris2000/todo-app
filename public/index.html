@@ -76,6 +76,18 @@
   <p id="today-events" class="today-events" hidden></p>
   <p id="workload" class="workload" hidden></p>
 
+  <!-- Plan the day ---------------------------------------------------------->
+  <!-- A proposal, recomputed on demand and never stored: see src/dayplan.js -->
+  <div class="dayplan">
+    <button type="button" id="plan-toggle" class="linkish" aria-expanded="false"
+            aria-controls="plan-panel">Fit today's list into today's gaps</button>
+    <div id="plan-panel" class="plan-panel" hidden>
+      <p id="plan-summary" class="muted small"></p>
+      <ol id="plan-blocks" class="plan-blocks"></ol>
+      <p id="plan-unplaced" class="muted small" hidden></p>
+    </div>
+  </div>
+
   <!-- Today's workout ------------------------------------------------------->
   <section id="workout-card" class="workout" hidden>
     <div class="workout-head">
@@ -119,6 +131,10 @@
           <span>Title</span>
           <input id="cam-title" type="text" maxlength="200">
         </label>
+        <label class="check-row">
+          <input id="cam-is-event" type="checkbox">
+          <span>This is an event, not a task</span>
+        </label>
         <div class="row">
           <label class="field">
             <span>Date</span>
@@ -131,6 +147,18 @@
               <option value="work" id="cam-opt-work" selected>Work</option>
               <option value="fitness" id="cam-opt-fitness">Fitness</option>
             </select>
+          </label>
+        </div>
+        <!-- A task can have a start time too - "drop the form off at 3" is a
+             task, not an appointment - so only the end time is event-only. -->
+        <div class="row" id="cam-times">
+          <label class="field">
+            <span>Starts</span>
+            <input id="cam-start" type="time">
+          </label>
+          <label class="field">
+            <span>Ends</span>
+            <input id="cam-end" type="time">
           </label>
         </div>
         <label class="field">
@@ -174,6 +202,12 @@
         <label class="field">
           <span>Deadline</span>
           <input id="f-deadline" type="date">
+        </label>
+        <label class="field">
+          <span>At</span>
+          <!-- Optional. A task with a time is still a task: nothing alerts you
+               at the hour, and it is not subtracted from the day's capacity. -->
+          <input id="f-start" type="time">
         </label>
       </div>
 
@@ -327,8 +361,10 @@
                inputmode="numeric" placeholder="0">
       </label>
       <p class="muted small" style="margin-top:16px">
-        Evening nudge — sent only if something due that day is still open.
-        Finish everything and nothing arrives.
+        Evening nudge — what is still open, and what tomorrow holds. Every night
+        by default, since the night before is the only time the second half is
+        any use. Silent when there is nothing owed <em>and</em> tomorrow is
+        clear.
       </p>
       <div class="day-toggles" id="evening-days" role="group" aria-label="Evening nudge days">
         <button type="button" data-day="0">Sun</button>
@@ -399,15 +435,19 @@
     </section>
 
     <section class="setting-block">
-      <h3>Weekly schedule</h3>
+      <h3>Calendar</h3>
       <p class="muted small">
-        Standing commitments — clinic, teaching, recurring meetings. They appear
-        in your morning brief and reduce the time counted as free.
+        Standing commitments — clinic, teaching, recurring meetings — and one-off
+        dates. Both appear in your morning brief and reduce the time counted as
+        free; only the one-offs clear themselves once the day has passed.
       </p>
       <div id="event-list" class="event-list"></div>
       <div class="event-add">
         <div class="plan-row">
           <select class="shrink" id="ev-day"></select>
+          <!-- Revealed when "Just once" is chosen. The weekday select and this
+               are the same question asked two ways, so only one is ever up. -->
+          <input class="shrink" id="ev-date" type="date" hidden>
           <input class="grow" id="ev-title" placeholder="Clinic" maxlength="120">
         </div>
         <div class="plan-row">
@@ -420,6 +460,62 @@
           <span>Rarely attend — show it, but don't count the time</span>
         </label>
       </div>
+    </section>
+
+    <section class="setting-block">
+      <h3>Subscribe from your calendar</h3>
+      <p class="muted small">
+        Publishes your rota, commitments, one-off dates and timed tasks as a
+        calendar your iPhone, Mac or watch can subscribe to. Read-only — nothing
+        added there comes back here.
+      </p>
+      <p class="muted small">
+        <strong>The link is the password.</strong> Anyone holding it can read
+        your calendar without signing in, and it will sit in Apple's or Google's
+        servers, so keep titles free of anything you would not put in an email.
+        Regenerating the link immediately stops the old one working.
+      </p>
+      <div id="feed-off">
+        <button type="button" id="feed-enable" class="btn">Create a calendar link</button>
+      </div>
+      <div id="feed-on" hidden>
+        <input id="feed-url" class="grow" type="text" readonly>
+        <div class="plan-row">
+          <button type="button" id="feed-copy" class="btn">Copy link</button>
+          <button type="button" id="feed-new" class="btn">Regenerate</button>
+          <button type="button" id="feed-off-btn" class="device-remove">Turn off</button>
+        </div>
+        <p class="muted small">
+          On iPhone: Settings → Apps → Calendar → Accounts → Add Account → Other
+          → Add Subscribed Calendar, then paste. On a Mac: Calendar → File →
+          New Calendar Subscription.
+        </p>
+      </div>
+      <p id="feed-status" class="muted small"></p>
+    </section>
+
+    <section class="setting-block">
+      <h3>Add by voice</h3>
+      <p class="muted small">
+        A Shortcut on your iPhone lets you say &ldquo;Hey Siri, add to To Do&rdquo;
+        and dictate a line. It is understood exactly as if you had typed it here,
+        so &ldquo;call the lab friday 3pm&rdquo; and &ldquo;dinner thursday
+        7pm&ndash;9pm&rdquo; land as a task and an event respectively.
+      </p>
+      <p class="muted small">
+        Keep patient details out of it — dictation goes through Apple, and the
+        text is stored here as a plain title.
+      </p>
+      <button type="button" id="shortcut-make" class="btn">Create a token</button>
+      <div id="shortcut-out" hidden>
+        <p class="muted small"><strong>Copy this now — it is shown once.</strong>
+          It appears below as &ldquo;Siri Shortcut&rdquo; and can be revoked there
+          at any time.</p>
+        <input id="shortcut-token" class="grow" type="text" readonly>
+        <button type="button" id="shortcut-copy" class="btn">Copy token</button>
+        <p class="muted small" id="shortcut-steps"></p>
+      </div>
+      <p id="shortcut-status" class="muted small"></p>
     </section>
 
     <section class="setting-block">

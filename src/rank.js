@@ -60,6 +60,18 @@ export function scoreTask(task, todayISO) {
   return score;
 }
 
+/** "3pm", "9:30am". Shared by the digest and the task list. */
+export function timeLabel(hhmm) {
+  if (!hhmm) return null;
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm));
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h < 0 || h > 23 || min < 0 || min > 59) return null;
+  const hour = ((h + 11) % 12) + 1;
+  return `${hour}${min ? `:${String(min).padStart(2, '0')}` : ''}${h < 12 ? 'am' : 'pm'}`;
+}
+
 /** Human label for a deadline, relative to today. */
 export function deadlineLabel(deadline, todayISO) {
   if (!deadline) return null;
@@ -121,7 +133,10 @@ export function buildDigest(tasks, todayISO, labels = DEFAULT_FOLDER_LABELS) {
   const showFolder = folders.size > 1;
 
   const lines = top.map((t, i) => {
-    const due = t.due_label ? ` (${t.due_label})` : '';
+    // Time and deadline share one parenthesis: "(due today, 3pm)" reads as one
+    // fact about when, where two brackets read as two separate warnings.
+    const when = [t.due_label, timeLabel(t.start_time)].filter(Boolean).join(', ');
+    const due = when ? ` (${when})` : '';
     // Was a two-way test that labelled every fitness task "Personal". With
     // renameable folders that would be wrong twice over.
     const category = t.category || 'personal';

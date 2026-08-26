@@ -17,7 +17,7 @@ function csvCell(value) {
 }
 
 export const CSV_COLUMNS = [
-  'title', 'notes', 'folder', 'deadline', 'priority',
+  'title', 'notes', 'folder', 'deadline', 'start_time', 'priority',
   'estimate_minutes', 'status', 'recur', 'subtasks', 'completed_at',
 ];
 
@@ -40,6 +40,7 @@ export function tasksToCsv(tasks, labels = {}) {
       t.notes,
       labels[t.category] || t.category || 'personal',
       t.deadline || '',
+      t.start_time || '',
       PRIORITY_NAMES[t.priority] || 'normal',
       t.estimate_minutes || '',
       t.status || 'open',
@@ -70,6 +71,7 @@ export function tasksToMarkdown(tasks, labels = {}, todayISO = '') {
     for (const t of items) {
       const bits = [];
       if (t.deadline) bits.push(`due ${t.deadline}`);
+      if (t.start_time) bits.push(`at ${t.start_time}`);
       if (t.estimate_minutes) bits.push(`${t.estimate_minutes}m`);
       if (t.priority === 1) bits.push('high');
       lines.push(`- [ ] ${t.title}${bits.length ? ` _(${bits.join(', ')})_` : ''}`);
@@ -159,6 +161,9 @@ const ALIASES = {
   notes: ['notes', 'note', 'description', 'details', 'comment'],
   folder: ['folder', 'category', 'list', 'project', 'section', 'area', 'tag'],
   deadline: ['deadline', 'due', 'due date', 'date', 'duedate', 'due_date', 'when'],
+  // Not 'time': that is already an alias for estimate_minutes, and a column
+  // headed "time" is far more often a duration than a clock time.
+  start_time: ['start time', 'start', 'at', 'time of day', 'starts'],
   priority: ['priority', 'importance', 'flag'],
   estimate_minutes: ['estimate_minutes', 'estimate', 'minutes', 'duration', 'time'],
   status: ['status', 'completed', 'done', 'state'],
@@ -193,6 +198,27 @@ const cleanDate = (v) => {
   // Accept the common human forms other exporters produce.
   const parsed = Date.parse(s);
   return Number.isNaN(parsed) ? null : new Date(parsed).toISOString().slice(0, 10);
+};
+
+/**
+ * A clock time out of whatever another app wrote: "15:00", "3pm", "3:05 PM".
+ *
+ * Deliberately refuses anything it cannot read rather than guessing. A wrong
+ * time is worse than no time - you would act on it.
+ */
+const cleanClock = (v) => {
+  const s = String(v ?? '').trim().toLowerCase();
+  if (!s) return null;
+  const m = /^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/.exec(s);
+  if (!m) return null;
+  let h = Number(m[1]);
+  const min = Number(m[2] ?? 0);
+  if (min > 59) return null;
+  if (m[3]) {
+    if (h < 1 || h > 12) return null;
+    h = (h % 12) + (m[3] === 'pm' ? 12 : 0);
+  } else if (h > 23) return null;
+  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
 };
 
 function cleanPriority(value) {
@@ -256,6 +282,7 @@ export function rowsToTasks(rows, { categories = ['personal', 'work', 'fitness']
       notes: String(at('notes') ?? '').slice(0, 4000),
       category,
       deadline: cleanDate(at('deadline')),
+      start_time: cleanClock(at('start_time')),
       priority: cleanPriority(at('priority')),
       estimate_minutes: Number.isFinite(minutes) && minutes > 0 ? Math.round(minutes) : null,
       status: done ? 'done' : 'open',
@@ -367,7 +394,9 @@ export function parseMarkdown(text) {
  * a different scale from ours and from every app's UI.
  */
 export function icsToRows(text, timeZone = 'UTC') {
-  const header = ['title', 'notes', 'folder', 'deadline', 'priority', 'status'];
+  // parseIcsDate has always resolved the clock time on a DUE or DTSTART; there
+  // was nowhere to put it, so it was dropped. A task can hold one now.
+  const header = ['title', 'notes', 'folder', 'deadline', 'start_time', 'priority', 'status'];
   const rows = [header];
 
   const todos = parseIcsTodos(text, { timeZone });
@@ -378,9 +407,10 @@ export function icsToRows(text, timeZone = 'UTC') {
       const priority = !t.priority ? 'normal'
         : t.priority <= 4 ? 'high'
           : t.priority >= 6 ? 'low' : 'normal';
+      const when = t.due || t.start;
       rows.push([
         t.summary, t.description || '', t.categories || '',
-        (t.due || t.start)?.date || '', priority, done ? 'done' : 'open',
+        when?.date || '', when?.time || '', priority, done ? 'done' : 'open',
       ]);
     }
     return { rows, kind: 'VTODO', count: todos.length };
@@ -395,7 +425,7 @@ export function icsToRows(text, timeZone = 'UTC') {
     if (!seen.has(key)) seen.set(key, e);
   }
   for (const e of seen.values()) {
-    rows.push([e.title, '', '', e.date, 'normal', 'open']);
+    rows.push([e.title, '', '', e.date, e.start_time || '', 'normal', 'open']);
   }
   return { rows, kind: 'VEVENT', count: seen.size };
 }

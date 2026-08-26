@@ -14,7 +14,7 @@
 // decrypt sits in the header, so a file written today still opens years from
 // now even if these defaults change.
 //
-//   magic       8 bytes   "TODOBK01"
+//   magic       8 bytes   "TODOBK02"
 //   iterations  4 bytes   uint32 big-endian
 //   salt       16 bytes
 //   iv         12 bytes

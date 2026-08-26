@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   notes             TEXT NOT NULL DEFAULT '',   -- "what it needs" / context
   category          TEXT NOT NULL DEFAULT 'personal', -- 'personal' | 'work'
   deadline          TEXT,                       -- YYYY-MM-DD, null = no deadline
+  start_time        TEXT,                       -- HH:MM, optional time of day
   priority          INTEGER NOT NULL DEFAULT 2, -- 1 high, 2 normal, 3 low
   estimate_minutes  INTEGER,                    -- rough effort, optional
   status            TEXT NOT NULL DEFAULT 'open', -- 'open' | 'done'

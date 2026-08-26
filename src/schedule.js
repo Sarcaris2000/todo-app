@@ -8,6 +8,8 @@
 
 import { parseIcs, minutesBetween } from './ics.js';
 import { parseBlocks, toMinutes } from './freetime.js';
+// events.js imports nothing from here, so this direction is safe.
+import { eventMinutes } from './events.js';
 
 const MAX_FEED_BYTES = 4 * 1024 * 1024;
 
@@ -278,7 +280,32 @@ export async function nextFreeDays(env, todayISO, mappings, horizonDays = 120) {
     byDate.get(row.date).push(row);
   }
 
-  const isClear = (iso) => clinicalMinutesForDay(byDate.get(iso) ?? [], mappings) === 0;
+  // A day is not clear because the roster is empty. Standing commitments and
+  // one-off appointments occupy it just as surely, and calling such a day
+  // "clear" while listing an appointment on it - which is what happened -
+  // makes the whole line untrustworthy.
+  const { results: events } = await env.DB.prepare(
+    'SELECT date, day_of_week, start_time, end_time, tentative FROM events',
+  ).all();
+
+  const weekly = new Map();
+  const oneOff = new Map();
+  for (const e of events ?? []) {
+    const bucket = e.date ? oneOff : weekly;
+    const key = e.date ?? e.day_of_week;
+    if (!bucket.has(key)) bucket.set(key, []);
+    bucket.get(key).push(e);
+  }
+
+  // A tentative commitment reports zero minutes, so it correctly does not
+  // block a day from counting as clear.
+  const eventMinutesOn = (iso, weekday) =>
+    [...(weekly.get(weekday) ?? []), ...(oneOff.get(iso) ?? [])]
+      .reduce((n, e) => n + eventMinutes(e), 0);
+
+  const isClear = (iso, weekday) =>
+    clinicalMinutesForDay(byDate.get(iso) ?? [], mappings) === 0
+    && eventMinutesOn(iso, weekday) === 0;
 
   let nextDay = null;
   let nextWeekend = null;
@@ -288,13 +315,14 @@ export async function nextFreeDays(env, todayISO, mappings, horizonDays = 120) {
     const iso = new Date(ms).toISOString().slice(0, 10);
     const weekday = new Date(ms).getUTCDay();
 
-    if (!nextDay && isClear(iso)) nextDay = iso;
+    if (!nextDay && isClear(iso, weekday)) nextDay = iso;
 
     // A weekend only counts if both days are clear; a free Saturday followed
     // by a call Sunday is not a weekend off.
     if (!nextWeekend && weekday === 6) {
       const sunday = new Date(ms + 86400000).toISOString().slice(0, 10);
-      if (isClear(iso) && isClear(sunday)) nextWeekend = { saturday: iso, sunday };
+      // 6 is Saturday, so the Sunday after it is 0.
+      if (isClear(iso, 6) && isClear(sunday, 0)) nextWeekend = { saturday: iso, sunday };
     }
 
     if (nextDay && nextWeekend) break;

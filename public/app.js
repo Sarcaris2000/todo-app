@@ -14,6 +14,7 @@ let filter = 'open';
 let search = '';
 let editingSubtasks = [];
 let upcomingClinical = [];
+let upcomingEvents = [];
 let upcomingDays = Number(localStorage.getItem('todo.upcomingDays')) || 7;
 
 // Which folder is being viewed: 'all' | 'work' | 'personal' | 'fitness'. Sticky per device.
@@ -131,6 +132,37 @@ function deadlineLabel(deadline, today) {
   return `due ${deadline}`;
 }
 
+/**
+ * "3pm", "9:30am". Mirrors timeLabel in rank.js, which does the same job for
+ * the notification text - the two must agree, or a task reads one way on the
+ * lock screen and another in the list.
+ */
+function timeLabel(hhmm) {
+  if (!hhmm) return null;
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm));
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h < 0 || h > 23 || min < 0 || min > 59) return null;
+  const hour = ((h + 11) % 12) + 1;
+  return `${hour}${min ? `:${String(min).padStart(2, '0')}` : ''}${h < 12 ? 'am' : 'pm'}`;
+}
+
+/**
+ * "8am-12pm", "7pm", "6am-7pm". One format for every span in the UI.
+ *
+ * The app used to show four at once on a single screen: a task chip said
+ * "3pm", the Coming up row said "19:00-21:30", the clinical strip said
+ * "06:00–19:00", and the notification said "4pm-5pm" - four renderings of the
+ * same kind of fact, which reads as four different kinds of thing.
+ */
+function timeRange(start, end) {
+  const from = timeLabel(start);
+  if (!from) return null;
+  const to = timeLabel(end);
+  return to ? `${from}-${to}` : from;
+}
+
 function estimateLabel(minutes) {
   if (!minutes) return null;
   if (minutes < 60) return `${minutes} min`;
@@ -175,6 +207,9 @@ function taskRowHtml(task, rank) {
 
     const due = deadlineLabel(task.deadline, config.today);
     if (due) chips.push(`<span class="chip ${dueClass}">${escapeHtml(due)}</span>`);
+    // Sits next to the deadline: together they are one answer to "when".
+    const at = timeLabel(task.start_time);
+    if (at) chips.push(`<span class="chip at-time">${escapeHtml(at)}</span>`);
     if (task.priority === 1) chips.push('<span class="chip p1">High</span>');
     if (task.priority === 3) chips.push('<span class="chip">Low</span>');
     const estimate = estimateLabel(task.estimate_minutes);
@@ -287,6 +322,9 @@ function renderFreeDays(free) {
   box.textContent = bits.join(' · ');
 }
 
+// Least movable first: a rostered shift, then an appointment, then a task.
+const KIND_ORDER = { clinical: 0, event: 1, task: 2 };
+
 function renderUpcoming() {
   const section = $('upcoming-section');
   const container = $('upcoming-list');
@@ -298,13 +336,16 @@ function renderUpcoming() {
     ...upcomingClinical
       .filter((c) => c.date > config.today && c.date <= horizon)
       .map((c) => ({ date: c.date, kind: 'clinical', entry: c })),
+    ...upcomingEvents
+      .filter((e) => e.date > config.today && e.date <= horizon)
+      .map((e) => ({ date: e.date, kind: 'event', entry: e })),
     ...tasks
       .filter((t) => t.status === 'open' && !t.snoozed
         && t.deadline && t.deadline > config.today && t.deadline <= horizon)
       .map((t) => ({ date: t.deadline, kind: 'task', task: t })),
   ].sort((a, b) => String(a.date).localeCompare(String(b.date))
-    // Rostered work first within a day: it is the part that cannot move.
-    || (a.kind === 'clinical' ? -1 : 1));
+    // Within a day the order runs from what cannot move to what can.
+    || (KIND_ORDER[a.kind] - KIND_ORDER[b.kind]));
 
   section.hidden = false;
   $('upcoming-empty').hidden = rows.length > 0;
@@ -331,10 +372,22 @@ function renderUpcoming() {
         </div>`;
     }
 
+    if (row.kind === 'event') {
+      const e = row.entry;
+      const when = timeRange(e.start_time, e.end_time);
+      return `${heading}
+        <div class="clinical-row is-event">
+          <span class="clinical-dot" aria-hidden="true"></span>
+          <span class="clinical-title">${escapeHtml(e.title)}</span>
+          ${when ? `<span class="clinical-hours">${escapeHtml(when)}</span>` : ''}
+        </div>`;
+    }
+
     const t = row.task;
     const folder = folderLabel(t.category);
     return `${heading}
       <div class="upcoming-task" data-edit="${t.id}">
+        <span class="clinical-dot" aria-hidden="true"></span>
         <span class="clinical-title">${escapeHtml(t.title)}</span>
         <span class="chip folder-${escapeHtml(t.category || 'personal')}">${escapeHtml(folder)}</span>
         ${t.priority === 1 ? '<span class="chip p1">High</span>' : ''}
@@ -348,13 +401,18 @@ function renderUpcoming() {
 
 const EV_DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
+// Today according to the server, which is the clock that decides what "once,
+// today" means. Empty until the calendar has been loaded at least once.
+let todayFromServer = '';
+
 function renderTodayEvents(events, clinical) {
   const box = $('today-events');
 
   // Rostered clinical work first: it is the part you cannot move.
   const parts = [
     ...(clinical || []).map((c) => {
-      if (c.start_time && c.end_time) return `${c.title} ${c.start_time}–${c.end_time}`;
+      const when = timeRange(c.start_time, c.end_time);
+      if (when && c.end_time) return `${c.title} ${when}`;
       return c.minutes ? `${c.title} (${prettyMinutes(c.minutes)})` : c.title;
     }),
     ...(events || []).map((e) => e.label),
@@ -389,40 +447,83 @@ async function loadSchedule() {
     : '<p class="muted small">No assignments mapped yet.</p>';
 }
 
+/** "Thu 27 Aug" - short, and unambiguous about which Thursday. */
+function shortDate(iso) {
+  const d = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${EV_DAYS[d.getUTCDay()].slice(0, 3)} ${d.getUTCDate()} ${
+    ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getUTCMonth()]}`;
+}
+
+/**
+ * The calendar list in Settings.
+ *
+ * Split in two, because one list could not say which rows repeat. A one-off
+ * was rendered under its weekday like everything else - "Thu", no date - so a
+ * teleclinic on the 27th was indistinguishable from a standing Thursday
+ * commitment, and the today highlight fired on every Thursday after it.
+ */
+function eventRow(e, isToday) {
+  const time = (timeRange(e.start_time, e.end_time) ?? 'any time')
+    + (e.tentative ? ' · rarely attend' : '');
+  // A one-off is stamped with its date; only a dateless row is a weekday.
+  const when = e.date ? shortDate(e.date) : EV_DAYS[e.day_of_week].slice(0, 3);
+  return `
+    <div class="event-row ${isToday ? 'is-today' : ''}">
+      <span class="event-day ${e.date ? 'is-once' : ''}">${escapeHtml(when)}</span>
+      <div style="flex:1;min-width:0">
+        <div>${escapeHtml(e.title)}</div>
+        <div class="muted small">${escapeHtml(time)}</div>
+      </div>
+      <button class="device-remove" data-ev-remove="${e.id}">Remove</button>
+    </div>`;
+}
+
 async function loadEvents() {
   const { events, today } = await api('/events');
   const container = $('event-list');
+
+  // The server's date, not the browser's: it is the one that decides which day
+  // a new event lands on. Done before the empty-calendar return below, since
+  // adding your first event is exactly when the default matters most.
+  todayFromServer = today.date || todayFromServer;
+  syncEventKind();
+
+  const weekly = events.filter((e) => !e.date);
+  const once = events.filter((e) => e.date);
 
   if (!events.length) {
     container.innerHTML = '<p class="muted small">Nothing scheduled yet.</p>';
     return;
   }
 
-  container.innerHTML = events.map((e) => {
-    const time = (e.start_time
-      ? `${e.start_time}${e.end_time ? `–${e.end_time}` : ''}`
-      : 'any time') + (e.tentative ? ' · rarely attend' : '');
-    return `
-      <div class="event-row ${e.day_of_week === today.day_of_week ? 'is-today' : ''}">
-        <span class="event-day">${escapeHtml(EV_DAYS[e.day_of_week].slice(0, 3))}</span>
-        <div style="flex:1;min-width:0">
-          <div>${escapeHtml(e.title)}</div>
-          <div class="muted small">${escapeHtml(time)}</div>
-        </div>
-        <button class="device-remove" data-ev-remove="${e.id}">Remove</button>
-      </div>`;
-  }).join('');
+  const sections = [];
+  if (weekly.length) {
+    sections.push(`<p class="muted small ev-heading">Every week</p>`
+      + weekly.map((e) => eventRow(e, e.day_of_week === today.day_of_week)).join(''));
+  }
+  if (once.length) {
+    sections.push(`<p class="muted small ev-heading">Just once</p>`
+      + once.map((e) => eventRow(e, e.date === today.date)).join(''));
+  }
+  container.innerHTML = sections.join('');
 }
 
 async function addEvent() {
   const title = $('ev-title').value.trim();
   if (!title) { toast('Give the event a name'); return; }
 
+  const once = $('ev-day').value === 'once';
+  if (once && !$('ev-date').value) { toast('Pick a date'); return; }
+
   try {
     await api('/events', {
       method: 'POST',
+      // A date makes it a one-off; a weekday makes it a standing commitment.
+      // The server derives the weekday from the date, so sending both would
+      // only create a way for them to disagree.
       body: JSON.stringify({
-        day_of_week: Number($('ev-day').value),
+        ...(once ? { date: $('ev-date').value } : { day_of_week: Number($('ev-day').value) }),
         title,
         start_time: $('ev-start').value || null,
         end_time: $('ev-end').value || null,
@@ -435,7 +536,7 @@ async function addEvent() {
     $('ev-tentative').checked = false;
     await loadEvents();
     await refresh();
-    toast('Added to your week');
+    toast(once ? 'Added to your calendar' : 'Added to your week');
   } catch (error) {
     toast(error.message);
   }
@@ -451,6 +552,13 @@ const parseInput = (raw) => (typeof globalThis.parseQuickAdd === 'function'
   // parse.js missing: treat the whole line as a plain title rather than break.
   : { title: raw, deadline: null, priority: 2, category: null, estimate_minutes: null, recur: null });
 
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+// null = follow the parser's guess; 'task'/'event' = the user overrode it.
+let quickKindOverride = null;
+
+const quickKind = (p) => quickKindOverride || (p.kind === 'event' ? 'event' : 'task');
+
 function renderQuickPreview() {
   const box = $('quick-preview');
   const raw = $('quick-input').value.trim();
@@ -465,9 +573,20 @@ function renderQuickPreview() {
   if (p.estimate_minutes) toks.push(estimateLabel(p.estimate_minutes));
   if (p.recur) toks.push(RECUR_LABELS[p.recur]);
 
+  // The guess is never binding: it is shown, and one tap flips it. Nobody
+  // should have to learn that a time range means "event" - they should see what
+  // is about to be created and correct it when it is wrong.
+  const isEvent = quickKind(p) === 'event';
+  if (isEvent) {
+    if (p.time) toks.unshift(p.endTime ? `${p.time}-${p.endTime}` : p.time);
+    if (p.repeatsWeekly) toks.unshift(`every ${DAY_NAMES[p.dayOfWeek]}`);
+  }
+
   box.hidden = false;
-  box.innerHTML = `<b>${escapeHtml(p.title)}</b>`
-    + toks.map((t) => `<span class="tok">${escapeHtml(t)}</span>`).join('');
+  box.innerHTML = `<span class="kind${isEvent ? ' is-event' : ''}">${isEvent ? 'Event' : 'Task'}</span>`
+    + `<b>${escapeHtml(p.title)}</b>`
+    + toks.map((t) => `<span class="tok">${escapeHtml(t)}</span>`).join('')
+    + `<button type="button" class="kind-flip" id="quick-flip">make it a ${isEvent ? 'task' : 'event'}</button>`;
 }
 
 async function submitQuickAdd(event) {
@@ -476,23 +595,44 @@ async function submitQuickAdd(event) {
   if (!raw) return;
 
   const p = parseInput(raw);
+  const kind = quickKind(p);
   try {
-    await api('/tasks', {
-      method: 'POST',
-      body: JSON.stringify({
-        title: p.title,
-        deadline: p.deadline,
-        priority: p.priority,
-        // Unstated folder follows the view you are in, same as the full form.
-        category: p.category || (folder === 'all' ? 'personal' : folder),
-        estimate_minutes: p.estimate_minutes,
-        recur: p.recur,
-      }),
-    });
+    if (kind === 'event') {
+      await api('/events', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: p.title,
+          // A weekly commitment carries a weekday; a one-off carries a date.
+          ...(p.repeatsWeekly
+            ? { day_of_week: p.dayOfWeek }
+            : { date: p.date || p.deadline || config.today }),
+          start_time: p.time || null,
+          end_time: p.endTime || null,
+        }),
+      });
+    } else {
+      await api('/tasks', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: p.title,
+          deadline: p.deadline,
+          // The preview already showed this time back as confirmation that it
+          // had been understood, and then the request dropped it. Saying "3pm"
+          // and storing nothing was the worst of both.
+          start_time: p.time || null,
+          priority: p.priority,
+          // Unstated folder follows the view you are in, same as the full form.
+          category: p.category || (folder === 'all' ? 'personal' : folder),
+          estimate_minutes: p.estimate_minutes,
+          recur: p.recur,
+        }),
+      });
+    }
     $('quick-input').value = '';
     $('quick-preview').hidden = true;
+    quickKindOverride = null;
     await refresh();
-    toast('Added');
+    toast(kind === 'event' ? 'Event added' : 'Added');
   } catch (error) {
     toast(error.message);
   }
@@ -860,6 +1000,7 @@ async function refresh() {
   // Assigned before any render call - renderUpcoming() reads this, and
   // populating it afterwards left the section a render behind.
   upcomingClinical = todayData.upcomingClinical || [];
+  upcomingEvents = todayData.upcomingEvents || [];
   renderFreeDays(todayData.free);
   tasks = taskData.tasks;
   config.today = taskData.today;
@@ -887,12 +1028,14 @@ async function refresh() {
   renderTodayEvents(todayData.events, todayData.clinical);
   renderWorkload(todayData.workload);
 
-  // The digest always spans both folders, so report the combined total here
-  // rather than whatever folder happens to be on screen.
+  // The digest spans every folder, so report the combined total here rather
+  // than whatever folder happens to be on screen. It used to say "both
+  // folders", which stopped being true when the third folder arrived and would
+  // be wrong again for anyone who renames them.
   const totalOpen = totalOpenCount;
   const hour12 = `${((config.notifyHour + 11) % 12) + 1}${config.notifyHour < 12 ? 'am' : 'pm'}`;
   $('digest-note').textContent = totalOpen
-    ? `${totalOpen} open across both folders · digest at ${hour12}`
+    ? `${totalOpen} open across all folders · digest at ${hour12}`
     : `Digest at ${hour12}`;
 }
 
@@ -919,6 +1062,7 @@ function openForm(task = null) {
   // A new task lands in the folder you're looking at; "All" defaults to personal.
   $('f-category').value = task?.category || (folder === 'all' ? 'personal' : folder);
   $('f-deadline').value = task?.deadline || '';
+  $('f-start').value = task?.start_time || '';
   $('f-recur').value = task?.recur || '';
   try { editingSubtasks = JSON.parse(task?.subtasks || '[]'); } catch { editingSubtasks = []; }
   renderSubtasks();
@@ -949,6 +1093,7 @@ async function submitForm(event) {
     notes: $('f-notes').value.trim(),
     category: $('f-category').value,
     recur: $('f-recur').value || null,
+    start_time: $('f-start').value || null,
     subtasks: editingSubtasks,
     snooze: $('f-snooze').value || null,
     hide_until_due: $('f-hide-until-due').checked,
@@ -1212,8 +1357,161 @@ function buildHourOptions() {
 }
 
 function buildEventDayOptions() {
-  $('ev-day').innerHTML = EV_DAYS
-    .map((d, i) => `<option value="${i}">${d}</option>`).join('');
+  // "Just once" first, because a one-off is the thing you are most likely to
+  // be adding by hand; the seven weekdays are set up once and rarely revisited.
+  // Until this existed, Settings could only make weekly commitments, and the
+  // only route to a one-off was typing a date into quick add.
+  $('ev-day').innerHTML = '<option value="once">Just once…</option>'
+    + EV_DAYS.map((d, i) => `<option value="${i}">Every ${d}</option>`).join('');
+}
+
+/**
+ * Show the date field only when "Just once" is selected.
+ *
+ * Called once during wiring - before sign-in, when config.today is still the
+ * empty placeholder - and again from loadEvents once the real date is known.
+ * Guarding on config.today keeps the first call from writing an empty value
+ * that looks deliberate.
+ */
+function syncEventKind() {
+  const once = $('ev-day').value === 'once';
+  $('ev-date').hidden = !once;
+  const today = todayFromServer || config.today;
+  if (once && !$('ev-date').value && today) $('ev-date').value = today;
+}
+
+// --------------------------------------------------------------------------
+// the day plan
+// --------------------------------------------------------------------------
+
+const planClock = (mins) => timeLabel(
+  `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`);
+
+/**
+ * Draw the proposal.
+ *
+ * Deliberately not interactive: there is nothing to drag and nothing to save.
+ * It answers "what could I get done today" and then gets out of the way - the
+ * list stays the thing you actually work from.
+ */
+function renderPlan(plan) {
+  const summary = $('plan-summary');
+  const list = $('plan-blocks');
+
+  if (!plan.blocks.length) {
+    list.innerHTML = '';
+    summary.textContent = plan.available === 0
+      ? 'No working time left today.'
+      : 'Nothing on the list fits the time that is left.';
+  } else {
+    list.innerHTML = plan.blocks.map((b) => `
+      <li class="plan-block ${b.conflict ? 'is-clash' : ''}">
+        <span class="plan-time">${escapeHtml(planClock(b.start))}</span>
+        <span class="plan-title">${escapeHtml(b.title)}</span>
+        <span class="plan-mins">${b.minutes}m</span>
+      </li>`).join('');
+    summary.textContent = `${prettyMinutes(plan.scheduled)} placed`
+      + (plan.spare ? `, ${prettyMinutes(plan.spare)} still free` : ', nothing spare');
+  }
+
+  // Saying what did not fit is the honest half: a plan that shows four things
+  // and silently omits six reads as "today is fine". But when there was no
+  // time to begin with, naming every task is just the whole list again - the
+  // summary above has already given the only useful answer.
+  const notes = [];
+  if (plan.conflicts) {
+    notes.push(`${plan.conflicts} pinned to a time you are already committed.`);
+  }
+  if (plan.unplaced.length && plan.available > 0) {
+    const named = plan.unplaced.slice(0, 4).map((u) => u.title);
+    const rest = plan.unplaced.length - named.length;
+    notes.push(`Did not fit: ${named.join(', ')}${rest ? `, and ${rest} more` : ''}.`);
+  }
+  $('plan-unplaced').hidden = !notes.length;
+  $('plan-unplaced').textContent = notes.join(' ');
+}
+
+async function loadPlan() {
+  $('plan-summary').textContent = 'Working it out…';
+  try {
+    renderPlan(await api('/day-plan'));
+  } catch (error) {
+    $('plan-summary').textContent = error.message;
+    $('plan-blocks').innerHTML = '';
+  }
+}
+
+// --------------------------------------------------------------------------
+// calendar feed
+// --------------------------------------------------------------------------
+
+function renderFeed(info) {
+  const on = Boolean(info.enabled && info.url);
+  $('feed-off').hidden = on;
+  $('feed-on').hidden = !on;
+  if (on) $('feed-url').value = info.url;
+}
+
+async function loadFeed() {
+  try {
+    renderFeed(await api('/feed'));
+  } catch {
+    $('feed-status').textContent = 'Could not check the calendar link.';
+  }
+}
+
+/**
+ * Mint a link, or replace the one that exists.
+ *
+ * Replacing is the only revoke there is for a URL already sitting in Apple's
+ * servers, so the confirm spells out that subscribed calendars will stop
+ * updating rather than quietly breaking later.
+ */
+async function newFeedLink(replacing) {
+  if (replacing && !confirm(
+    'Regenerate the link?\n\nAny calendar already subscribed with the old link '
+    + 'will stop updating until you give it the new one.')) return;
+  try {
+    renderFeed(await api('/feed', { method: 'POST' }));
+    $('feed-status').textContent = replacing
+      ? 'New link created. Re-subscribe anywhere you used the old one.'
+      : 'Link created. Paste it into your calendar app.';
+  } catch (error) {
+    $('feed-status').textContent = error.message;
+  }
+}
+
+/**
+ * Mint a token for a Siri Shortcut and show how to use it.
+ *
+ * The token is shown once and never again - the server keeps only a hash - so
+ * the steps are printed alongside it rather than behind another click.
+ */
+async function makeShortcutToken() {
+  if (!confirm(
+    'Create a token for Siri?\n\nIt is shown once and lets anything holding it '
+    + 'add to your list. You can revoke it under signed-in devices.')) return;
+  try {
+    const r = await api('/shortcut-token', { method: 'POST' });
+    $('shortcut-out').hidden = false;
+    $('shortcut-token').value = r.token;
+    $('shortcut-steps').innerHTML = [
+      'In Shortcuts: <b>+</b>, then add <b>Dictate Text</b> — it has to come first.',
+      'Add <b>Get Contents of URL</b> below it.',
+      `URL <code>${escapeHtml(r.endpoint)}?format=text</code>, Method <b>POST</b>.`,
+      'Headers: <code>Authorization</code> = <code>Bearer &lt;the token above&gt;</code>'
+        + ' — the word Bearer, one space, then the token. No colon.',
+      'Request Body <b>JSON</b>, one field, key <code>text</code> (lowercase),'
+        + ' value = the blue <b>Dictated Text</b> chip. Tap it in; do not type it.',
+      'Add <b>Show Notification</b> last, showing <b>Contents of URL</b>, so you'
+        + ' can see what was understood.',
+      'Name it &ldquo;Add to To Do&rdquo; — the name is what you say to Siri.',
+    ].map((line, i) => `${i + 1}. ${line}`).join('<br>');
+    $('shortcut-status').textContent = '';
+    await loadSessions().catch(() => {});
+  } catch (error) {
+    $('shortcut-status').textContent = error.message;
+  }
 }
 
 async function loadArchiveStatus() {
@@ -1267,6 +1565,7 @@ async function openSettings() {
   await loadSessions().catch(() => {});
   await loadPlanEditor().catch(() => {});
   await loadEvents().catch(() => {});
+  await loadFeed().catch(() => {});
   await loadArchiveStatus().catch(() => {});
   await loadSchedule().catch(() => {});
   await refreshBackupStatus().catch(() => {});
@@ -1490,7 +1789,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('f-estimate').addEventListener('input', syncQuickPicks);
 
   $('quick-form').addEventListener('submit', submitQuickAdd);
-  $('quick-input').addEventListener('input', renderQuickPreview);
+  $('quick-input').addEventListener('input', () => {
+    // Typing again means the guess is worth re-making.
+    quickKindOverride = null;
+    renderQuickPreview();
+  });
+
+  // Delegated: the preview is rebuilt on every keystroke, so the button itself
+  // is a different element each time.
+  $('quick-preview').addEventListener('click', (event) => {
+    if (!event.target.closest('#quick-flip')) return;
+    const p = parseInput($('quick-input').value.trim());
+    quickKindOverride = quickKind(p) === 'event' ? 'task' : 'event';
+    renderQuickPreview();
+  });
 
   $('search').addEventListener('input', (event) => {
     search = event.target.value.trim();
@@ -1606,7 +1918,52 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (event.target === $('settings')) $('settings').hidden = true;
   });
 
+  $('plan-toggle').addEventListener('click', async () => {
+    const panel = $('plan-panel');
+    const opening = panel.hidden;
+    panel.hidden = !opening;
+    $('plan-toggle').setAttribute('aria-expanded', String(opening));
+    $('plan-toggle').textContent = opening
+      ? 'Hide the plan' : "Fit today's list into today's gaps";
+    // Recomputed every time it opens: an hour of clinic later, the answer is
+    // different, and a stale plan is worse than none.
+    if (opening) await loadPlan();
+  });
+
+  $('shortcut-make').addEventListener('click', makeShortcutToken);
+  $('feed-enable').addEventListener('click', () => newFeedLink(false));
+  $('feed-new').addEventListener('click', () => newFeedLink(true));
+  $('feed-off-btn').addEventListener('click', async () => {
+    if (!confirm('Turn off the calendar link? Subscribed calendars will stop updating.')) return;
+    renderFeed(await api('/feed', { method: 'DELETE' }));
+    $('feed-status').textContent = 'Calendar link turned off.';
+  });
+  /**
+   * Copy a field's value, saying so either way.
+   *
+   * Clipboard access is refused in plenty of contexts - an insecure origin, a
+   * denied permission, an in-app browser - so the fallback selects the text
+   * instead of reporting a dead end. On a phone that leaves it one tap from
+   * the Copy item in the selection menu.
+   */
+  const copyField = async (fieldId, statusId) => {
+    const value = $(fieldId).value;
+    try {
+      await navigator.clipboard.writeText(value);
+      $(statusId).textContent = 'Copied.';
+    } catch {
+      $(fieldId).select();
+      $(fieldId).setSelectionRange(0, value.length); // iOS ignores select() alone
+      $(statusId).textContent = 'Selected — copy it from the menu.';
+    }
+  };
+
+  $('feed-copy').addEventListener('click', () => copyField('feed-url', 'feed-status'));
+  $('shortcut-copy').addEventListener('click', () => copyField('shortcut-token', 'shortcut-status'));
+
   buildEventDayOptions();
+  syncEventKind();
+  $('ev-day').addEventListener('change', syncEventKind);
   $('ev-add').addEventListener('click', addEvent);
   $('ev-title').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); addEvent(); }
@@ -1614,6 +1971,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('event-list').addEventListener('click', async (event) => {
     const button = event.target.closest('[data-ev-remove]');
     if (!button) return;
+    // Deleting a task asks first; deleting a commitment did not, even though a
+    // weekly one takes more setting up and there is no undo for either.
+    const name = button.closest('.event-row')?.querySelector('div > div')?.textContent?.trim();
+    if (!confirm(`Remove ${name ? `"${name}"` : 'this'} from your calendar?`)) return;
     await api(`/events/${button.dataset.evRemove}`, { method: 'DELETE' });
     await loadEvents();
     await refresh();
@@ -1696,8 +2057,21 @@ document.addEventListener('DOMContentLoaded', async () => {
       // An encrypted backup is base64 armour around a binary container whose
       // first eight bytes are the magic. Detect it here so the user gets a
       // clear message rather than a JSON parse error on a wall of base64.
-      const sealed = /^TODOBK01/.test(atob(raw.slice(0, 24).replace(/\s+/g, '')).slice(0, 8))
-        || file.name.endsWith('.enc');
+      //
+      // Matched by prefix rather than by exact version. This read TODOBK01
+      // while the writer had moved to TODOBK02, so the magic check could never
+      // fire and only the filename fallback was doing any work - which would
+      // have failed the moment a file was renamed. Any TODOBK<nn> is an
+      // encrypted backup as far as detection goes; the server checks the exact
+      // version and reports a mismatch properly.
+      let sealed = file.name.endsWith('.enc');
+      try {
+        sealed = /^TODOBK\d{2}/.test(atob(raw.slice(0, 24).replace(/\s+/g, '')).slice(0, 8))
+          || sealed;
+      } catch {
+        // Not base64 at all, so it is not an encrypted backup. atob throws on
+        // a plain JSON file, which used to take the whole handler with it.
+      }
 
       const result = await api('/import', {
         method: 'POST',
@@ -1803,21 +2177,39 @@ document.addEventListener('DOMContentLoaded', async () => {
       const r = result.reading;
       pendingReading = r;
 
+      // The reader already decides between an event and a task - a poster for
+      // Grand Rounds is not something you tick off. That answer used to be
+      // discarded, and everything became a task.
+      $('cam-is-event').checked = r.kind === 'event';
       $('cam-title').value = r.title;
       $('cam-date').value = r.date || '';
+      $('cam-start').value = r.time || '';
+      $('cam-end').value = r.endTime || '';
       $('cam-notes').value = [r.location, r.notes].filter(Boolean).join(' - ');
       $('cam-category').value = folder === 'all' ? 'work' : folder;
+      syncCameraKind();
 
+      const kindWord = r.kind === 'event' ? 'Event' : 'Task';
       const when = r.date ? `${r.date}${r.time ? ` at ${r.time}` : ''}` : 'no date found';
       const unsure = r.confidence === 'low'
         ? ' The photo was hard to read, so check this carefully.'
         : '';
-      showCameraResult(`Read as: ${r.title} - ${when}.${unsure}`,
+      showCameraResult(`${kindWord}: ${r.title} - ${when}.${unsure}`,
         { warn: r.confidence === 'low', fields: true });
     } catch (error) {
       showCameraResult(`Could not read that photo: ${error.message}`, { warn: true });
     }
   });
+
+  // Both kinds can carry a start time; only an event has an end. A task with
+  // an end time would be an event, and events already exist.
+  function syncCameraKind() {
+    const isEvent = $('cam-is-event').checked;
+    $('cam-end').closest('.field').hidden = !isEvent;
+    $('cam-category').closest('.field').hidden = isEvent;
+  }
+
+  $('cam-is-event').addEventListener('change', syncCameraKind);
 
   $('cam-cancel').addEventListener('click', () => {
     pendingReading = null;
@@ -1831,23 +2223,38 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     const button = $('cam-save');
     button.disabled = true;
+    const asEvent = $('cam-is-event').checked;
     try {
-      // Created through the ordinary endpoint, so a photographed task goes
-      // through exactly the same validation as a typed one.
-      await api('/tasks', {
-        method: 'POST',
-        body: JSON.stringify({
-          title,
-          notes: $('cam-notes').value.trim(),
-          category: $('cam-category').value,
-          deadline: $('cam-date').value || null,
-          priority: 2,
-        }),
-      });
+      // Created through the ordinary endpoints, so a photographed entry gets
+      // exactly the same validation as a typed one.
+      if (asEvent) {
+        await api('/events', {
+          method: 'POST',
+          body: JSON.stringify({
+            title,
+            date: $('cam-date').value || config.today,
+            start_time: $('cam-start').value || null,
+            end_time: $('cam-end').value || null,
+            notes: $('cam-notes').value.trim(),
+          }),
+        });
+      } else {
+        await api('/tasks', {
+          method: 'POST',
+          body: JSON.stringify({
+            title,
+            notes: $('cam-notes').value.trim(),
+            category: $('cam-category').value,
+            deadline: $('cam-date').value || null,
+            start_time: $('cam-start').value || null,
+            priority: 2,
+          }),
+        });
+      }
       pendingReading = null;
       $('camera-result').hidden = true;
       $('camera-fields').hidden = true;
-      toast('Added from photo');
+      toast(asEvent ? 'Event added from photo' : 'Added from photo');
       await refresh();
     } catch (error) {
       showCameraResult(error.message, { warn: true, fields: true });
@@ -1861,7 +2268,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     button.disabled = true;
     button.textContent = 'Resetting...';
     try {
-      await api('/demo/reset', { method: 'POST' });
+      const result = await api('/demo/reset', { method: 'POST' });
+      // The reset invalidated this device's session on purpose; the response
+      // carries its replacement, so the reload lands back inside the app.
+      if (result?.token) {
+        token = result.token;
+        localStorage.setItem(TOKEN_KEY, token);
+      }
       location.reload();
     } catch {
       button.textContent = 'Reset failed';

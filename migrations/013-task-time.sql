@@ -1,0 +1,13 @@
+-- A task can now carry a time of day.
+--
+-- The parser has understood "call the lab friday 3pm" for a while: it resolved
+-- the 15:00 and showed it back in the preview as confirmation. There was
+-- nowhere to put it, so it was dropped on the way to the database - the worst
+-- possible combination, since the preview said it had been understood.
+--
+-- This is deliberately only a start time. A task with an end time is an event,
+-- and events already exist; giving tasks a duration would make the two
+-- indistinguishable for no gain. Time stays optional - most tasks do not have
+-- one, and a task with a time is still a task, not an appointment: nothing
+-- reminds you at 15:00 and nothing subtracts it from the day's capacity.
+ALTER TABLE tasks ADD COLUMN start_time TEXT;

@@ -38,6 +38,12 @@ function demoTasks(todayISO) {
       notes: 'Sample data. Nothing here is a real patient.',
     },
     {
+      // Carries a time: a task can be pinned to an hour without becoming an
+      // appointment. Nothing alerts at 3pm and no capacity is deducted.
+      id: 'demo-11', title: 'Call the lab about the spirometry order', category: 'work',
+      deadline: t(0), start_time: '15:00', priority: 2, estimate_minutes: 10,
+    },
+    {
       id: 'demo-3', title: 'Peloton - 30 min endurance ride', category: 'fitness',
       deadline: t(0), priority: 2, estimate_minutes: 30,
     },
@@ -99,6 +105,19 @@ const DEMO_EVENTS = [
   { id: 'demo-ev-2', title: 'Fellow teaching', day_of_week: 3, start_time: '12:00', end_time: '13:00', tentative: 0 },
   { id: 'demo-ev-3', title: 'Grand Rounds', day_of_week: 4, start_time: '08:00', end_time: '09:00', tentative: 1 },
   { id: 'demo-ev-4', title: 'Research meeting', day_of_week: 2, start_time: '16:00', end_time: '17:00', tentative: 0 },
+];
+
+/**
+ * One-off dates, relative to whenever the demo is seeded.
+ *
+ * The four above are the standing week. Without these the demo showed only
+ * weekly commitments, so the calendar looked like something that could hold a
+ * rota and nothing else - a visitor had no way to see that a dinner on a
+ * particular Thursday has somewhere to live.
+ */
+const DEMO_ONE_OFFS = [
+  { id: 'demo-ev-5', in_days: 2, title: 'Dinner with the Harrisons', start_time: '19:00', end_time: '21:30' },
+  { id: 'demo-ev-6', in_days: 9, title: 'Dentist', start_time: '08:15', end_time: '09:00' },
 ];
 
 // `blocks` is JSON, and it is what makes a split day read as "6h committed,
@@ -173,11 +192,11 @@ export async function seedDemo(env, todayISO) {
 
   for (const t of demoTasks(todayISO)) {
     await env.DB.prepare(
-      `INSERT INTO tasks (id, title, notes, category, deadline, priority, estimate_minutes,
+      `INSERT INTO tasks (id, title, notes, category, deadline, start_time, priority, estimate_minutes,
                           status, recur, subtasks, hide_until_due, created_at, updated_at, completed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
-      t.id, t.title, t.notes ?? '', t.category, t.deadline, t.priority,
+      t.id, t.title, t.notes ?? '', t.category, t.deadline, t.start_time ?? null, t.priority,
       t.estimate_minutes ?? null, t.status ?? 'open', t.recur ?? null,
       JSON.stringify(t.subtasks ?? []), t.hide_until_due ?? 0,
       now, now, t.status === 'done' ? now : null,
@@ -189,6 +208,17 @@ export async function seedDemo(env, todayISO) {
       `INSERT INTO events (id, day_of_week, title, start_time, end_time, notes, tentative, created_at)
        VALUES (?, ?, ?, ?, ?, '', ?, ?)`,
     ).bind(e.id, e.day_of_week, e.title, e.start_time, e.end_time, e.tentative, now).run();
+  }
+
+  for (const e of DEMO_ONE_OFFS) {
+    const date = shift(todayISO, e.in_days);
+    // day_of_week is NOT NULL and is always derived from the date, exactly as
+    // cleanEvent does it - the seed must not be the one place they disagree.
+    const dow = new Date(`${date}T00:00:00Z`).getUTCDay();
+    await env.DB.prepare(
+      `INSERT INTO events (id, date, day_of_week, title, start_time, end_time, notes, tentative, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, '', 0, ?)`,
+    ).bind(e.id, date, dow, e.title, e.start_time, e.end_time, now).run();
   }
 
   for (const sh of DEMO_SERVICE_HOURS) {

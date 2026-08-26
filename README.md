@@ -29,6 +29,16 @@ copy to your own Cloudflare account, and your data lives in your database.
 - **Import and export that other software understands** - CSV, Markdown
   checklists, JSON, and iCalendar. Coming from another app, or leaving for one,
   should not mean retyping anything.
+- **Publishes a calendar feed of its own.** One read-only `.ics` URL your phone,
+  Mac or watch can subscribe to, carrying the rota, standing commitments,
+  one-off dates and anything pinned to an hour. Off until you turn it on.
+- **Add things by voice.** A Siri Shortcut posts a dictated line to the same
+  parser typing uses, and reads back what it understood.
+- **Fits the list into the day.** Takes the gaps your commitments leave and lays
+  the ranked list into them using each task's estimate, naming whatever does not
+  fit rather than quietly dropping it.
+- **An evening nudge** with what is still owed and what tomorrow holds, since the
+  evening is the last point you can do anything about tomorrow.
 - **Weekly backups to your own Google Drive**, encrypted before they leave, with
   a restore path that has been tested rather than assumed.
 
@@ -125,6 +135,89 @@ apps' UI.
 An earlier version guessed, and turned a Markdown heading into a task called
 `## Work`; silently inventing tasks is a worse failure than saying no.
 
+## Typing things in
+
+The quick-add box takes a whole line and pulls the structure out of it. A
+**task** is something you finish; an **event** is something that happens whether
+or not you act. **A time range makes an event; a single time makes a task**,
+because "call the lab at 3pm" is a thing to do, not an appointment:
+
+```
+Dinner sep 12 7pm-9:30pm        -> event, once, on 12 September
+Teleclinic thursday 2pm-3pm     -> event, once, this Thursday
+Clinic every tuesday 8am-12pm   -> event, every Tuesday
+Call the lab friday 3pm         -> task, due Friday, at 3pm
+Grand rounds every thursday 8am -> task, repeating weekly, at 8am
+```
+
+A pill beside the box shows which it decided on, and clicking it switches — so
+the range rule is a default, not a trap. It also reads `#work` for the folder,
+`p1`/`!!` for priority, `30m` for an estimate, and dates as `tomorrow`,
+`next week`, `sep 12`, or a weekday. **`next thursday` means the Thursday of
+next week**, not the one in two days; a bare `thursday` or `this thursday` means
+the next one coming up.
+
+An event with a date happens once and clears itself the day after it passes; an
+event without one repeats weekly and stays until you remove it.
+
+## The calendar feed
+
+**Settings -> Subscribe from your calendar -> Create a calendar link.** Paste the
+URL into any calendar app that takes a subscription.
+
+**The link is the password.** There is no sign-in on it — that is what makes it
+subscribable — so anyone holding it can read the calendar, and it will sit in
+your calendar provider's servers for as long as the subscription does. It is off
+by default, never travels in a backup, and **Regenerate** revokes the old link
+immediately.
+
+Three details that are easy to get wrong and are worth knowing:
+
+- Recurring commitments are **expanded into individual dated entries**, not
+  published as an `RRULE`. A recurrence anchored to a UTC instant drifts by an
+  hour across a daylight-saving boundary; expanding sidesteps it.
+- Rostered work uses **your assignment mapping rather than the feed's own
+  window** — many rotas pad an assignment to a generic coverage block, and a
+  calendar showing that is worse than no calendar.
+- Tasks and zero-minute cover are published as **free**, not busy, so other
+  people's scheduling tools do not treat your whole week as blocked.
+
+## Adding things by voice
+
+**Settings -> Add by voice -> Create a token**, then build a Shortcut of three
+actions: **Dictate Text**, **Get Contents of URL** POSTing `{"text": "..."}` to
+`/api/quick?format=text`, and **Show Notification**.
+
+`?format=text` answers with a bare sentence — *"Task: Call the lab — Fri 28 Aug,
+3pm, Work"* — rather than JSON, so the Shortcut can put it straight into a
+notification. That receipt exists because dictation is the one input with no
+preview: it is where you catch a misheard word or a date a week out.
+
+The folder can be spoken. A dictated `#` arrives as the literal word "hashtag",
+so say `...for work` or `...hashtag work` at the end instead. It only counts as
+the last thing said, so "sign the form for personal reasons" keeps its words.
+
+The token is an ordinary session: it appears under signed-in devices, is revoked
+with the same button as a phone, and its expiry slides forward each time it is
+used.
+
+## Fitting the list into the day
+
+**Fit today's list into today's gaps**, under the workload line. It takes what
+your commitments leave free and lays the ranked list into it using each task's
+estimate.
+
+- A task with a **time of day keeps that hour** — it is laid down first and
+  everything else works around it. If that hour is already committed, the block
+  is marked as clashing rather than quietly moved.
+- Nothing is scheduled into time that has already passed.
+- **What does not fit is named.** A planner that shows four things and silently
+  omits six is telling you the day is fine when it is not.
+
+Nothing is saved. The plan is recomputed every time you open it, so there is
+never a stale schedule to reconcile — a plan that persists becomes a second list
+to maintain.
+
 ## Deploying a change
 
 ```bash
@@ -178,7 +271,7 @@ than typing does, and the image leaves your Worker to be read.
 npm test
 ```
 
-Around 580 checks covering the push encryption against an independent
+Around 840 checks covering the push encryption against an independent
 decryption, ranking, recurrence, the iCalendar parser, free-window maths, auth
 and lockout, the restore path against a real SQLite database, backup encryption
 including tamper detection, every import format including the ones that used to
@@ -195,9 +288,15 @@ different matter and *are* encrypted - see above. **Do not put anything
 confidential in a task title** — for clinical users, that means no patient
 identifiers.
 
-Backups deliberately exclude push subscriptions and sign-in sessions. Those are
-device credentials, they are recreated by signing in again, and cloud storage is
-the wrong place for them.
+Backups deliberately exclude push subscriptions, sign-in sessions, and the
+calendar feed token. Those are credentials, they are recreated in a click, and
+cloud storage is the wrong place for any of them. The feed token is also refused
+on the way back in, so restoring an older backup cannot quietly revive a link you
+had regenerated to revoke.
+
+The calendar feed is the one thing that deliberately leaves, and only if you turn
+it on. It is a read-only URL with no sign-in, which is what lets a calendar app
+subscribe — and why the link is the password.
 
 ## Licence
 

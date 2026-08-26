@@ -30,6 +30,11 @@ const META_RUNTIME_KEYS = new Set([
   'schedule_synced_at', 'schedule_last_result', 'schedule_feed_hash',
   'demo_reset_window', 'demo_reset_date', 'demo_seeded_at',
   'vision_day', 'vision_used',
+  // Never restore the calendar feed token. Backups written before it was
+  // excluded from exports still carry one, and restoring it would silently
+  // bring a link back to life after it had been regenerated to revoke it -
+  // turning "revoked" into "revoked until the next restore".
+  'feed_token',
 ]);
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
