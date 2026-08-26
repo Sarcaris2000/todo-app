@@ -7,6 +7,13 @@
 // The point is not to replace the app. It is that a dinner typed here should
 // appear on the lock screen and the watch alongside everything else, without
 // anyone entering it twice.
+//
+// Titles and times only - deliberately no notes. This feed leaves the building:
+// it is read by a calendar provider's servers and by anyone holding the link,
+// and the warning shown when you create one talks about titles. Publishing the
+// notes field as well would have been more than that warning describes, and
+// notes are exactly where the detail collects. The feed answers "when"; the app
+// still answers "what".
 
 import { listEvents } from './events.js';
 import { scheduleFrom, getMappings, matchMapping } from './schedule.js';
@@ -95,7 +102,6 @@ function weeklyEvents(events, fromISO, days, timeZone, stamp) {
         start: e.start_time,
         end: e.end_time,
         timeZone,
-        notes: e.notes,
         // A meeting you rarely attend belongs on the calendar but must not
         // tell anyone else's scheduling tool that you are unavailable.
         busy: !e.tentative,
@@ -131,7 +137,6 @@ function taskEvents(tasks, timeZone, stamp) {
       start: t.start_time,
       end: toHHMM(endMinutes),
       timeZone,
-      notes: t.notes,
       // A task is something you intend to do, not somewhere you have to be.
       // Marking it busy would have the app quietly declining your meetings.
       busy: false,
@@ -173,7 +178,6 @@ export async function buildFeed(env, todayISO, timeZone, name = 'To Do') {
       start: e.start_time,
       end: e.end_time,
       timeZone,
-      notes: e.notes,
       busy: !e.tentative,
       stamp,
     })),

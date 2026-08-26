@@ -181,6 +181,9 @@ Three details that are easy to get wrong and are worth knowing:
   calendar showing that is worse than no calendar.
 - Tasks and zero-minute cover are published as **free**, not busy, so other
   people's scheduling tools do not treat your whole week as blocked.
+- **Titles and times only.** Notes are never published. The feed leaves the
+  building, and the warning shown when you create a link talks about titles, so
+  titles are all it carries.
 
 ## Adding things by voice
 

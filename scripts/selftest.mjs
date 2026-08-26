@@ -2724,6 +2724,14 @@ async function testNewFeatures() {
   check('regenerating replaces, which is the revoke',
     /const feedToken = newFeedToken\(\);\s*\n\s*await setSetting\(env, 'feed_token', feedToken\)/.test(indexSrc));
   check('the UI says the link is the password', /The link is the password/.test(htmlSrc));
+  // The feed leaves the building. The warning talks about titles, so titles and
+  // times are all it may carry - notes are where the detail collects, and
+  // publishing them would be more than the warning describes.
+  check('the feed carries no notes', !/notes:/.test(read('src/feed.js')));
+  check('and nothing emits a DESCRIPTION line',
+    !/DESCRIPTION/.test(read('src/feed.js')));
+  check('the UI says so explicitly',
+    /Only titles and times are published/.test(htmlSrc));
   check('and warns before regenerating', /will stop updating until you give it the new one/.test(appSrc));
 
   // The token lives in meta for storage reasons, but it is a credential: a
